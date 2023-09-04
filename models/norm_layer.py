@@ -4,8 +4,8 @@ from torch.nn import functional as F
 
 def adapt_alpha_bn(model, alpha):
     return AlphaBN.adapt_model(model.net, alpha)
-def adapt_memory_bn(model, memory_size, use_prior):
-    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior)
+def adapt_memory_bn(model, memory_size, use_prior, batch_renorm):
+    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm)
 
 class AlphaBN(nn.Module):
     @ staticmethod
@@ -14,7 +14,7 @@ class AlphaBN(nn.Module):
         if parent is not None:
             for name, child in parent.named_children():
                 #FIXME: this may cause error if it will be combined with Tent or optimization method
-                child.requires_grad_(False)
+                # child.requires_grad_(False)
 
                 if isinstance(child, nn.BatchNorm2d):
                     module = AlphaBN(child, alpha)
@@ -65,7 +65,7 @@ class BatchNormWithMemory(nn.Module):
         if parent is None:
             return []
         for name, child in parent.named_children():
-            child.requires_grad_(False)
+            # child.requires_grad_(False)
             if isinstance(child, nn.BatchNorm2d):
                 module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm)
                 replace_mods.append((parent, name, module))
@@ -145,11 +145,11 @@ class BatchNormWithMemory(nn.Module):
 
         if self.use_prior:
             test_mean = (
-                self.use_prior * self.layer.running_mean
+                self.use_prior * self.layer.src_running_mean
                 + (1 - self.use_prior) * test_mean
             )
             test_var = (
-                self.use_prior * self.layer.running_var
+                self.use_prior * self.layer.src_running_var
                 + (1 - self.use_prior) * test_var
             )
 
