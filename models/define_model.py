@@ -1,5 +1,5 @@
 from robustbench.utils import load_model
-from robustbench.model_zoo.enums import ThreadModel
+from robustbench.model_zoo.enums import ThreatModel
 
 def define_model(args):
     if args.model == 'wideresnet28-10':
