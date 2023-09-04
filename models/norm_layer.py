@@ -4,6 +4,8 @@ from torch.nn import functional as F
 
 def adapt_alpha_bn(model, alpha):
     return AlphaBN.adapt_model(model.net, alpha)
+def adapt_memory_bn(model, memory_size, use_prior):
+    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior)
 
 class AlphaBN(nn.Module):
     @ staticmethod
@@ -49,6 +51,119 @@ class AlphaBN(nn.Module):
             input,
             mixed_mu,
             mixed_var,
+            self.layer.weight,
+            self.layer.bias,
+            False,
+            0,
+            self.layer.eps
+        )
+
+class BatchNormWithMemory(nn.Module):
+    @staticmethod
+    def find_bns(parent, memory_size, use_prior):
+        replace_mods = []
+        if parent is None:
+            return []
+        for name, child in parent.named_children():
+            child.requires_grad_(False)
+            if isinstance(child, nn.BatchNorm2d):
+                module = BatchNormWithMemory(child, memory_size, use_prior)
+                replace_mods.append((parent, name, module))
+            else:
+                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior))
+    
+        return replace_mods
+
+    @staticmethod
+    def adapt_model(model, memory_size, use_prior=None):
+        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior)
+        print(f"| Found {len(replace_mods)} modules to be replaced.")
+        for (parent, name, child) in replace_mods:
+            setattr(parent, name, child)
+        return model
+
+    def __init__(self, layer, memory_size, use_prior=None):
+        super().__init__()
+
+        self.layer = layer
+
+        self.memory_size = memory_size
+        self.use_prior = use_prior
+
+        self.batch_mu_memory = torch.randn((memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.batch_var_memory = torch.randn((memory_size, self.layer.num_features), device=self.layer.weight.device)
+
+        self.unbiased = False
+
+        self.pointer = 0
+        self.full = False
+
+        self.batch_pointer = 0
+        self.batch_full = False
+
+    def reset(self):
+        self.pointer = 0
+        self.full = False
+
+        self.batch_pointer = 0
+        self.batch_full = False
+
+    def get_batch_mu_and_var(self):
+        if self.batch_full:
+            return self.batch_mu_memory, self.batch_var_memory
+        return self.batch_mu_memory[:self.batch_pointer], self.batch_var_memory[:self.batch_pointer]
+
+    def forward(self, input):
+        # self._check_input_dim(input)
+        
+        # TODO: use mean_and_var or batch_norm(trainaing=True, momentum=1.0)???
+        batch_mu = input.mean([0, 2, 3])
+        batch_var = input.var([0, 2, 3], unbiased=False)
+        # batch_num = 1
+
+        # save mu and variance in memory
+        batch_start = self.batch_pointer
+        batch_end = self.batch_pointer + 1
+        batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
+
+        self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
+        self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
+
+        self.batch_pointer = batch_end % self.memory_size
+
+        if batch_end >= self.memory_size:
+            self.batch_full = True
+
+        # compute test mu and variance from in-memory elements
+        if self.batch_full:
+            test_mean = self.batch_mu_memory
+            test_var = self.batch_var_memory
+        else:
+            test_mean = self.batch_mu_memory[:self.batch_pointer, :]
+            test_var = self.batch_var_memory[:self.batch_pointer, :]
+
+        test_mean = torch.mean(test_mean, 0)
+        test_var = torch.mean(test_var, 0)
+
+        if self.use_prior:
+            test_mean = (
+                self.use_prior * self.layer.running_mean
+                + (1 - self.use_prior) * test_mean
+            )
+            test_var = (
+                self.use_prior * self.layer.running_var
+                + (1 - self.use_prior) * test_var
+            )
+
+        # input = (input - batch_mu[None, :, None, None]) / (torch.sqrt(batch_var[None, :, None, None] + self.eps))
+
+        # if self.affine:
+        #     input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+
+        return F.batch_norm(
+            input,
+            test_mean,
+            test_var,
             self.layer.weight,
             self.layer.bias,
             False,
