@@ -69,6 +69,9 @@ def main():
     if conf.args.model == "resnet18":
         from models import ResNet
         model = ResNet.ResNet18()
+    elif 'wideresnet' in conf.args.model:
+        from models import define_model
+        model = define_model(conf.args)
 
     # import modules after setting the seed
     from data_loader import data_loader as data_loader
