@@ -55,13 +55,14 @@ class DNN():
         if conf.args.iabn:
             iabn.convert_iabn(self.net)
 
-        if conf.args.load_checkpoint_path and conf.args.model not in ['wideresnet28-10', 'resnext29']:  # false if conf.args.load_checkpoint_path==''
+        if conf.args.load_checkpoint_path and conf.args.model not in ['wideresnet28-10', 'wideresnet40-2', 'resnext29']:  # false if conf.args.load_checkpoint_path==''
             self.load_checkpoint(conf.args.load_checkpoint_path)
 
-        # Add normalization layers
-        norm_layer = get_normalize_layer(conf.args.dataset)
-        if norm_layer:
-            self.net = torch.nn.Sequential(norm_layer, self.net)
+        if 'wideresnet' not in conf.args.model:
+            # Add normalization layers
+            norm_layer = get_normalize_layer(conf.args.dataset)
+            if norm_layer:
+                self.net = torch.nn.Sequential(norm_layer, self.net)
 
         self.net.to(device)
 
