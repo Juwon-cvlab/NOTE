@@ -60,43 +60,41 @@ class AlphaBN(nn.Module):
 
 class BatchNormWithMemory(nn.Module):
     @staticmethod
-    def find_bns(parent, memory_size, use_prior):
+    def find_bns(parent, memory_size, use_prior, batch_renorm=False):
         replace_mods = []
         if parent is None:
             return []
         for name, child in parent.named_children():
             child.requires_grad_(False)
             if isinstance(child, nn.BatchNorm2d):
-                module = BatchNormWithMemory(child, memory_size, use_prior)
+                module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm)
                 replace_mods.append((parent, name, module))
             else:
-                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior))
+                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm))
     
         return replace_mods
 
     @staticmethod
-    def adapt_model(model, memory_size, use_prior=None):
-        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior)
+    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False):
+        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm)
         print(f"| Found {len(replace_mods)} modules to be replaced.")
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
         return model
 
-    def __init__(self, layer, memory_size, use_prior=None):
+    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False):
         super().__init__()
 
         self.layer = layer
 
         self.memory_size = memory_size
         self.use_prior = use_prior
+        self.batch_renorm = batch_renorm
 
-        self.batch_mu_memory = torch.randn((memory_size, self.layer.num_features), device=self.layer.weight.device)
-        self.batch_var_memory = torch.randn((memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.batch_mu_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.batch_var_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
 
         self.unbiased = False
-
-        self.pointer = 0
-        self.full = False
 
         self.batch_pointer = 0
         self.batch_full = False
@@ -160,13 +158,31 @@ class BatchNormWithMemory(nn.Module):
         # if self.affine:
         #     input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
-        return F.batch_norm(
-            input,
-            test_mean,
-            test_var,
-            self.layer.weight,
-            self.layer.bias,
-            False,
-            0,
-            self.layer.eps
-        )
+        if self.batch_renorm:
+            input = BatchRenorm(input, test_mean, test_var, self.eps)
+            input = self.layer.weight * input + self.layer.bias
+        else:
+            return F.batch_norm(
+                input,
+                test_mean,
+                test_var,
+                self.layer.weight,
+                self.layer.bias,
+                False,
+                0,
+                self.layer.eps
+            )
+
+def BatchRenorm(batch, new_mu, new_std, eps):
+    # TODO: need to contain eps?
+    new_std = new_std + eps
+
+    batch_mu = batch.mean([0,2,3])
+    batch_std = batch.std([0,2,3], unbiased=False) + eps
+
+    r = batch_std.detach() / new_std
+    d = (batch_mu.detach() - new_mu) / new_std
+
+    output = (batch - batch_mu) / batch_std * r + d
+
+    return output
