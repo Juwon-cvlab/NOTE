@@ -70,7 +70,7 @@ def main():
         from models import ResNet
         model = ResNet.ResNet18()
     elif 'wideresnet' in conf.args.model:
-        from models import define_model
+        from models.define_model import define_model
         model = define_model(conf.args)
 
     # import modules after setting the seed
