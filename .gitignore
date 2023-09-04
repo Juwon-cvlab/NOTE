@@ -1,0 +1,6 @@
+*.tar.gz
+dataset/*
+log/
+raw_logs/
+
+__pycache__/
