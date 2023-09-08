@@ -60,29 +60,29 @@ class AlphaBN(nn.Module):
 
 class BatchNormWithMemory(nn.Module):
     @staticmethod
-    def find_bns(parent, memory_size, use_prior, batch_renorm=False):
+    def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False):
         replace_mods = []
         if parent is None:
             return []
         for name, child in parent.named_children():
             # child.requires_grad_(False)
             if isinstance(child, nn.BatchNorm2d):
-                module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm)
+                module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm, add_eps_numer)
                 replace_mods.append((parent, name, module))
             else:
-                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm))
+                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer))
     
         return replace_mods
 
     @staticmethod
-    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False):
-        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm)
+    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False):
+        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer)
         print(f"| Found {len(replace_mods)} modules to be replaced.")
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
         return model
 
-    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False):
+    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False):
         super().__init__()
 
         self.layer = layer
@@ -98,6 +98,8 @@ class BatchNormWithMemory(nn.Module):
 
         self.batch_pointer = 0
         self.batch_full = False
+
+        self.add_eps_numer = add_eps_numer
 
     def reset(self):
         self.pointer = 0
@@ -159,8 +161,10 @@ class BatchNormWithMemory(nn.Module):
         #     input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
         if self.batch_renorm:
-            input = BatchRenorm(input, test_mean, test_var, self.eps)
-            input = self.layer.weight * input + self.layer.bias
+            input = BatchRenorm(input, test_mean, test_var, self.layer.eps, self.add_eps_numer)
+            input = self.layer.weight[None, :, None, None] * input + self.layer.bias[None, :, None, None]
+
+            return input
         else:
             return F.batch_norm(
                 input,
@@ -173,16 +177,17 @@ class BatchNormWithMemory(nn.Module):
                 self.layer.eps
             )
 
-def BatchRenorm(batch, new_mu, new_std, eps):
+def BatchRenorm(batch, new_mu, new_var, eps, add_eps_numer=False):
     # TODO: need to contain eps?
-    new_std = new_std + eps
+    batch_mu = batch.mean([0, 2, 3])
+    batch_var = batch.var([0, 2, 3], unbiased=False)
 
-    batch_mu = batch.mean([0,2,3])
-    batch_std = batch.std([0,2,3], unbiased=False) + eps
+    if add_eps_numer:
+        r = torch.sqrt(batch_var.detach() + eps) / torch.sqrt(new_var + eps)
+    else:
+        r = torch.sqrt(batch_var.detach()) / torch.sqrt(new_var + eps)
+    d = (batch_mu.detach() - new_mu) / torch.sqrt(new_var + eps)
 
-    r = batch_std.detach() / new_std
-    d = (batch_mu.detach() - new_mu) / new_std
-
-    output = (batch - batch_mu) / batch_std * r + d
+    output = (batch - batch_mu[None, :, None, None]) / torch.sqrt(batch_var[None, :, None, None] + eps) * r[None, :, None, None] + d[None, :, None, None]
 
     return output
