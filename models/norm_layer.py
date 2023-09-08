@@ -4,8 +4,8 @@ from torch.nn import functional as F
 
 def adapt_alpha_bn(model, alpha):
     return AlphaBN.adapt_model(model.net, alpha)
-def adapt_memory_bn(model, memory_size, use_prior, batch_renorm):
-    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm)
+def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer):
+    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm, add_eps_numer)
 
 class AlphaBN(nn.Module):
     @ staticmethod
