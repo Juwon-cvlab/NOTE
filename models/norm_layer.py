@@ -4,8 +4,9 @@ from torch.nn import functional as F
 
 def adapt_alpha_bn(model, alpha):
     return AlphaBN.adapt_model(model.net, alpha)
-def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer):
-    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm, add_eps_numer)
+def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer, use_dynamic_weight, use_binary_select, std_threshold):
+    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                           use_dynamic_weight, use_binary_select, std_threshold)
 
 class AlphaBN(nn.Module):
     @ staticmethod
@@ -60,29 +61,35 @@ class AlphaBN(nn.Module):
 
 class BatchNormWithMemory(nn.Module):
     @staticmethod
-    def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False):
+    def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
         replace_mods = []
         if parent is None:
             return []
         for name, child in parent.named_children():
             # child.requires_grad_(False)
             if isinstance(child, nn.BatchNorm2d):
-                module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm, add_eps_numer)
+                module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                             use_dynamic_weight, use_binary_select, std_threshold)
                 replace_mods.append((parent, name, module))
             else:
-                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer))
+                replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                                                 use_dynamic_weight, use_binary_select, std_threshold))
     
         return replace_mods
 
     @staticmethod
-    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False):
-        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer)
+    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                    use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
+        replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer,
+                                                    use_dynamic_weight=use_dynamic_weight, use_binary_select=use_binary_select, std_threshold=std_threshold)
         print(f"| Found {len(replace_mods)} modules to be replaced.")
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
         return model
 
-    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False):
+    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
         super().__init__()
 
         self.layer = layer
@@ -101,12 +108,30 @@ class BatchNormWithMemory(nn.Module):
 
         self.add_eps_numer = add_eps_numer
 
+        self.use_dynamic_weight = use_dynamic_weight
+        self.use_binary_select = use_binary_select
+        self.std_threshold = std_threshold
+
     def reset(self):
         self.pointer = 0
         self.full = False
 
         self.batch_pointer = 0
         self.batch_full = False
+
+    def get_stat_of_mem(self, std=False):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        if std:
+            std_of_mem_mean = mem_mean.std([0], unbiased=False)
+            std_of_mem_var = mem_var.std([0], unbiased=False)
+            
+            return std_of_mem_mean, std_of_mem_var
+        else:
+            var_of_mem_mean = mem_mean.var([0], unbiased=False)
+            var_of_mem_var = mem_var.var([0], unbiased=False)
+
+            return var_of_mem_mean, var_of_mem_var
 
     def get_batch_mu_and_var(self):
         if self.batch_full:
@@ -145,15 +170,30 @@ class BatchNormWithMemory(nn.Module):
         test_mean = torch.mean(test_mean, 0)
         test_var = torch.mean(test_var, 0)
 
-        if self.use_prior:
+        if self.use_dynamic_weight:
+            prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var)
             test_mean = (
-                self.use_prior * self.layer.src_running_mean
-                + (1 - self.use_prior) * test_mean
+                prior_mu * self.layer.src_running_mean
+                + (1 - prior_mu) * test_mean
             )
             test_var = (
-                self.use_prior * self.layer.src_running_var
-                + (1 - self.use_prior) * test_var
+                prior_var * self.layer.src_running_var
+                + (1 - prior_var) * test_var
             )
+        elif self.use_binary_select:
+            test_mean, test_var = self.binary_selection(self.layer.src_running_mean,
+                                                        self.layer.src_running_var,
+                                                        test_mean, test_var, self.std_threshold)
+        else:
+            if self.use_prior:
+                test_mean = (
+                    self.use_prior * self.layer.src_running_mean
+                    + (1 - self.use_prior) * test_mean
+                )
+                test_var = (
+                    self.use_prior * self.layer.src_running_var
+                    + (1 - self.use_prior) * test_var
+                )
 
         # input = (input - batch_mu[None, :, None, None]) / (torch.sqrt(batch_var[None, :, None, None] + self.eps))
 
@@ -176,6 +216,52 @@ class BatchNormWithMemory(nn.Module):
                 0,
                 self.layer.eps
             )
+
+    def dynamic_weight(self, test_mu, test_var):
+        # TODO: layer-wise interpolation
+        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0))
+        test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0))
+
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+        mem_mean = torch.mean(mem_mean, 0)
+        mem_var = torch.mean(mem_var, 0)
+
+        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0))
+        test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0))
+
+        # TODO: same weight or separated weight?
+        prior_mu = test2src_mu / (test2src_mu + test2mem_mu)
+        prior_var = test2src_var / (test2src_var + test2mem_var)
+
+        self.last_prior_mu = prior_mu
+        self.last_prior_var = prior_var
+
+        return prior_mu, prior_var
+
+    def binary_selection(self, a_mu, a_var, b_mu, b_var, std_threshold=1.0):
+        std_of_mem_mu, std_of_mem_var = self.get_stat_of_mem(std=True)
+
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+        mem_mean = torch.mean(mem_mean, 0)
+        mem_var = torch.mean(mem_var, 0)
+
+        out_upper_mu = mem_mean + std_of_mem_mu * std_threshold
+        out_upper_var = mem_var + std_of_mem_var * std_threshold
+
+        out_lower_mu = mem_mean - std_of_mem_mu * std_threshold
+        out_lower_var = mem_var - std_of_mem_var * std_threshold
+
+        out_mu = out_upper_mu | out_lower_mu
+        out_var = out_upper_var | out_lower_var
+
+        # FIXME: channel-wise selection
+        output_mu = torch.where(out_mu, a_mu, b_mu)
+        output_var = torch.where(out_var, a_var, b_var)
+
+        self.last_prior_mu = out_mu
+        self.last_prior_var = out_var
+
+        return output_mu, output_var
 
 def BatchRenorm(batch, new_mu, new_var, eps, add_eps_numer=False):
     # TODO: need to contain eps?
