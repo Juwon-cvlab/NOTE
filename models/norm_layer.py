@@ -8,6 +8,27 @@ def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer, 
     return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm, add_eps_numer,
                                            use_dynamic_weight, use_binary_select, std_threshold)
 
+
+class WeightPredictionModule(nn.Module):
+    def __init__(self, channel, reduction_ratio=4):
+        super().__init__()
+
+        self.reduction_ratio = reduction_ratio
+        self.fc = nn.Sequential(
+                nn.Linear(channel, channel // reduction_ratio, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(channel // reduction_ratio, channel, bias=False),
+                nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        b, c = x.shape
+        alpha = self.fc(x)
+        alpha = alpha.view(b, c, 1, 1)
+
+        return alpha
+
+
 class AlphaBN(nn.Module):
     @ staticmethod
     def find_bns(parent, alpha):
@@ -132,6 +153,51 @@ class BatchNormWithMemory(nn.Module):
             var_of_mem_var = mem_var.var([0], unbiased=False)
 
             return var_of_mem_mean, var_of_mem_var
+        
+    def get_last_batch_mu_and_var(self):
+        last_index = (self.batch_pointer - 1) % self.memory_size
+
+        last_mu = self.batch_mu_memory[last_index,:].view(1, -1)
+        last_var = self.batch_var_memory[last_index,:].view(1, -1)
+
+        return last_mu, last_var
+    
+    def get_mixed_mu_and_var(self, prior_value=None):
+        
+        if self.use_instance:
+            if self.full:
+                test_mean = self.mu_memory
+                test_var = self.var_memory
+            else:
+                test_mean = self.mu_memory[:self.pointer, :]
+                test_var = self.var_memory[:self.pointer, :]
+        else:
+            if self.batch_full:
+                test_mean = self.batch_mu_memory
+                test_var = self.batch_var_memory
+            else:
+                test_mean = self.batch_mu_memory[:self.batch_pointer, :]
+                test_var = self.batch_var_memory[:self.batch_pointer, :]
+
+        test_mean = torch.mean(test_mean, 0, keepdim=True)
+        test_var = torch.mean(test_var, 0, keepdim=True)
+
+        if prior_value is not None:
+            prior = prior_value
+        else:
+            prior = self.use_prior
+
+        if prior:
+            test_mean = (
+                prior * self.layer.src_running_mean
+                + (1 - prior) * test_mean
+            )
+            test_var = (
+                prior * self.layer.src_running_var
+                + (1 - prior) * test_var
+            )
+
+        return test_mean, test_var
 
     def get_batch_mu_and_var(self):
         if self.batch_full:
@@ -219,19 +285,22 @@ class BatchNormWithMemory(nn.Module):
 
     def dynamic_weight(self, test_mu, test_var):
         # TODO: layer-wise interpolation
-        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0))
-        test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0))
+        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0)).squeeze()
+        test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0)).squeeze()
 
         mem_mean, mem_var = self.get_batch_mu_and_var()
         mem_mean = torch.mean(mem_mean, 0)
         mem_var = torch.mean(mem_var, 0)
 
-        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0))
-        test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0))
+        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0)).squeeze()
+        test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0)).squeeze()
 
         # TODO: same weight or separated weight?
-        prior_mu = test2src_mu / (test2src_mu + test2mem_mu)
-        prior_var = test2src_var / (test2src_var + test2mem_var)
+        prior_mu = 1 - (test2src_mu / (test2src_mu + test2mem_mu))
+        prior_var = 1 - (test2src_var / (test2src_var + test2mem_var))
+
+        prior_mu = prior_mu.detach()
+        prior_var = prior_var.detach()
 
         self.last_prior_mu = prior_mu
         self.last_prior_var = prior_var
@@ -251,8 +320,8 @@ class BatchNormWithMemory(nn.Module):
         out_lower_mu = mem_mean - std_of_mem_mu * std_threshold
         out_lower_var = mem_var - std_of_mem_var * std_threshold
 
-        out_mu = out_upper_mu | out_lower_mu
-        out_var = out_upper_var | out_lower_var
+        out_mu = (self.layer.src_running_mean >= out_upper_mu) | (out_lower_mu >= self.layer.src_running_mean)
+        out_var = (self.layer.src_running_var >= out_upper_var) | (out_lower_var >= self.layer.src_running_var)
 
         # FIXME: channel-wise selection
         output_mu = torch.where(out_mu, a_mu, b_mu)
