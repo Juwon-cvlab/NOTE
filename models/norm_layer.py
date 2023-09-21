@@ -10,24 +10,44 @@ def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer, 
 
 
 class WeightPredictionModule(nn.Module):
-    def __init__(self, channel, reduction_ratio=4):
+    def __init__(self, out_channel, channel, reduction_ratio=4, combined=False, channel_wise=False):
         super().__init__()
 
         self.reduction_ratio = reduction_ratio
-        self.fc = nn.Sequential(
+        self.combined = combined
+
+        if combined:
+            self.fc1 = nn.Sequential(
+                nn.Linear(channel, channel // reduction_ratio, bias=False),
+                nn.ReLU(inplace=True)
+            )
+            self.fc2_1 = nn.Sequential(
+                nn.Linear(channel // reduction_ratio, out_channel if channel_wise else 1, bias=False),
+                nn.Sigmoid()
+            )
+            self.fc2_2 = nn.Sequential(
+                nn.Linear(channel // reduction_ratio, out_channel if channel_wise else 1, bias=False),
+                nn.Sigmoid()
+            )
+
+        else:
+            self.fc1 = nn.Sequential(
                 nn.Linear(channel, channel // reduction_ratio, bias=False),
                 nn.ReLU(inplace=True),
-                nn.Linear(channel // reduction_ratio, channel, bias=False),
+                nn.Linear(channel // reduction_ratio, out_channel if channel_wise else 1, bias=False),
                 nn.Sigmoid()
-        )
+            )
         
     def forward(self, x):
-        b, c = x.shape
-        alpha = self.fc(x)
-        alpha = alpha.view(b, c, 1, 1)
+        y = self.fc1(x)
 
-        return alpha
+        if self.combined:
+            y1 = self.fc2_1(y)
+            y2 = self.fc2_2(y)
 
+            return y1, y2
+        else:
+            return y
 
 class AlphaBN(nn.Module):
     @ staticmethod
@@ -110,7 +130,7 @@ class BatchNormWithMemory(nn.Module):
         return model
 
     def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
-                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
+                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0, pred_module_type=0):
         super().__init__()
 
         self.layer = layer
@@ -132,7 +152,19 @@ class BatchNormWithMemory(nn.Module):
         self.use_dynamic_weight = use_dynamic_weight
         self.use_binary_select = use_binary_select
         self.std_threshold = std_threshold
+        self.pred_module_type = pred_module_type
 
+        if pred_module_type == 1 or pred_module_type == 2:
+            self.pred_module1 = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type + 1), reduction_ratio=4)
+            self.pred_module2 = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type + 1), reduction_ratio=4)
+
+            self.pred_module1.to(self.layer.weight.device)
+            self.pred_module2.to(self.layer.weight.device)
+        elif pred_module_type == 3 or pred_module_type == 4:
+            self.pred_module = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type - 1) * 2, reduction_ratio=4, combined=True)
+
+            self.pred_module.to(self.layer.weight.device)
+        
     def reset(self):
         self.pointer = 0
         self.full = False
@@ -164,7 +196,8 @@ class BatchNormWithMemory(nn.Module):
     
     def get_mixed_mu_and_var(self, prior_value=None):
         
-        if self.use_instance:
+        # if self.use_instance:
+        if False:
             if self.full:
                 test_mean = self.mu_memory
                 test_var = self.var_memory
@@ -250,6 +283,51 @@ class BatchNormWithMemory(nn.Module):
             test_mean, test_var = self.binary_selection(self.layer.src_running_mean,
                                                         self.layer.src_running_var,
                                                         test_mean, test_var, self.std_threshold)
+        elif self.pred_module_type == 1 or self.pred_module_type == 2:
+            if self.pred_module_type == 1:
+                module_input1 = torch.cat((test_mean, self.layer.src_running_mean))
+                module_input2 = torch.cat((test_var, self.layer.src_running_var))
+            elif self.pred_module_type == 2:
+                module_input1 = torch.cat((batch_mu, test_mean, self.layer.src_running_mean))
+                module_input2 = torch.cat((batch_var, test_var, self.layer.src_running_var))
+            else:
+                raise NotImplemented
+
+            alpha_mu = self.pred_module1(module_input1)
+            alpha_var = self.pred_module2(module_input2)
+
+            self.last_prior_mu = alpha_mu.detach()
+            self.last_prior_var = alpha_var.detach()
+
+            test_mean = (
+                alpha_mu * self.layer.src_running_mean
+                + (1 - alpha_mu) * test_mean
+            )
+            test_var = (
+                alpha_var * self.layer.src_running_var
+                + (1 - alpha_var) * test_var
+            )
+        elif self.pred_module_type == 3 or self.pred_module_type == 4:
+            if self.pred_module_type == 3:
+                module_input = torch.cat((test_mean, self.layer.src_running_mean, test_var, self.layer.src_running_var))
+            elif self.pred_module_type == 4:
+                module_input = torch.cat((batch_mu, test_mean, self.layer.src_running_mean, batch_var, test_var, self.layer.src_running_var))
+            else:
+                raise NotImplemented
+
+            alpha_mu, alpha_var = self.pred_module(module_input)
+
+            self.last_prior_mu = alpha_mu.detach()
+            self.last_prior_var = alpha_var.detach()
+
+            test_mean = (
+                alpha_mu * self.layer.src_running_mean
+                + (1 - alpha_mu) * test_mean
+            )
+            test_var = (
+                alpha_var * self.layer.src_running_var
+                + (1 - alpha_var) * test_var
+            )
         else:
             if self.use_prior:
                 test_mean = (
