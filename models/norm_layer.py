@@ -4,9 +4,9 @@ from torch.nn import functional as F
 
 def adapt_alpha_bn(model, alpha):
     return AlphaBN.adapt_model(model.net, alpha)
-def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer, use_dynamic_weight, use_binary_select, std_threshold):
-    return BatchNormWithMemory.adapt_model(model.net, memory_size, use_prior, batch_renorm, add_eps_numer,
-                                           use_dynamic_weight, use_binary_select, std_threshold)
+def adapt_memory_bn(model, memory_size, use_prior, batch_renorm, add_eps_numer, use_dynamic_weight, use_binary_select, std_threshold, pred_module_type):
+    return BatchNormWithMemory.adapt_model(model, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                           use_dynamic_weight, use_binary_select, std_threshold, pred_module_type)
 
 
 class WeightPredictionModule(nn.Module):
@@ -103,7 +103,7 @@ class AlphaBN(nn.Module):
 class BatchNormWithMemory(nn.Module):
     @staticmethod
     def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False,
-                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
+                 use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0, pred_module_type=0):
         replace_mods = []
         if parent is None:
             return []
@@ -111,19 +111,20 @@ class BatchNormWithMemory(nn.Module):
             # child.requires_grad_(False)
             if isinstance(child, nn.BatchNorm2d):
                 module = BatchNormWithMemory(child, memory_size, use_prior, batch_renorm, add_eps_numer,
-                                             use_dynamic_weight, use_binary_select, std_threshold)
+                                             use_dynamic_weight, use_binary_select, std_threshold, pred_module_type)
                 replace_mods.append((parent, name, module))
             else:
                 replace_mods.extend(BatchNormWithMemory.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer,
-                                                                 use_dynamic_weight, use_binary_select, std_threshold))
+                                                                 use_dynamic_weight, use_binary_select, std_threshold, pred_module_type))
     
         return replace_mods
 
     @staticmethod
     def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
-                    use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0):
+                    use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0, pred_module_type=0):
         replace_mods = BatchNormWithMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer,
-                                                    use_dynamic_weight=use_dynamic_weight, use_binary_select=use_binary_select, std_threshold=std_threshold)
+                                                    use_dynamic_weight=use_dynamic_weight, use_binary_select=use_binary_select, std_threshold=std_threshold,
+                                                    pred_module_type=pred_module_type)
         print(f"| Found {len(replace_mods)} modules to be replaced.")
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
