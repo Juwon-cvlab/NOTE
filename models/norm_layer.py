@@ -140,13 +140,18 @@ class BatchNormWithMemory(nn.Module):
         self.use_prior = use_prior
         self.batch_renorm = batch_renorm
 
-        self.batch_mu_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
-        self.batch_var_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        batch_mu_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        batch_var_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.register_buffer('batch_mu_memory', batch_mu_memory)
+        self.register_buffer('batch_var_memory', batch_var_memory)
 
         self.unbiased = False
 
-        self.batch_pointer = 0
-        self.batch_full = False
+        batch_pointer = torch.zeros(1, dtype=torch.int)
+        self.register_buffer('batch_pointer', batch_pointer)
+
+        batch_full = torch.zeros(1, dtype=torch.bool)
+        self.register_buffer('batch_full', batch_full)
 
         self.add_eps_numer = add_eps_numer
 
@@ -163,6 +168,17 @@ class BatchNormWithMemory(nn.Module):
             self.pred_module2.to(self.layer.weight.device)
         elif pred_module_type == 3 or pred_module_type == 4:
             self.pred_module = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type - 1) * 2, reduction_ratio=4, combined=True)
+
+            self.pred_module.to(self.layer.weight.device)
+        
+        if pred_module_type == 5 or pred_module_type == 6:
+            self.pred_module1 = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type - 3), reduction_ratio=4, channel_wise=True)
+            self.pred_module2 = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type - 3), reduction_ratio=4, channel_wise=True)
+
+            self.pred_module1.to(self.layer.weight.device)
+            self.pred_module2.to(self.layer.weight.device)
+        elif pred_module_type == 7 or pred_module_type == 8:
+            self.pred_module = WeightPredictionModule(self.layer.num_features, self.layer.num_features * (pred_module_type - 5) * 2, reduction_ratio=4, combined=True, channel_wise=True)
 
             self.pred_module.to(self.layer.weight.device)
         
@@ -188,7 +204,7 @@ class BatchNormWithMemory(nn.Module):
             return var_of_mem_mean, var_of_mem_var
         
     def get_last_batch_mu_and_var(self):
-        last_index = (self.batch_pointer - 1) % self.memory_size
+        last_index = (self.batch_pointer.item() - 1) % self.memory_size
 
         last_mu = self.batch_mu_memory[last_index,:].view(1, -1)
         last_var = self.batch_var_memory[last_index,:].view(1, -1)
@@ -210,8 +226,8 @@ class BatchNormWithMemory(nn.Module):
                 test_mean = self.batch_mu_memory
                 test_var = self.batch_var_memory
             else:
-                test_mean = self.batch_mu_memory[:self.batch_pointer, :]
-                test_var = self.batch_var_memory[:self.batch_pointer, :]
+                test_mean = self.batch_mu_memory[:self.batch_pointer.item(), :]
+                test_var = self.batch_var_memory[:self.batch_pointer.item(), :]
 
         test_mean = torch.mean(test_mean, 0, keepdim=True)
         test_var = torch.mean(test_var, 0, keepdim=True)
@@ -236,7 +252,7 @@ class BatchNormWithMemory(nn.Module):
     def get_batch_mu_and_var(self):
         if self.batch_full:
             return self.batch_mu_memory, self.batch_var_memory
-        return self.batch_mu_memory[:self.batch_pointer], self.batch_var_memory[:self.batch_pointer]
+        return self.batch_mu_memory[:self.batch_pointer.item()], self.batch_var_memory[:self.batch_pointer.item()]
 
     def forward(self, input):
         # self._check_input_dim(input)
@@ -247,14 +263,14 @@ class BatchNormWithMemory(nn.Module):
         # batch_num = 1
 
         # save mu and variance in memory
-        batch_start = self.batch_pointer
-        batch_end = self.batch_pointer + 1
+        batch_start = self.batch_pointer.item()
+        batch_end = self.batch_pointer.item() + 1
         batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
 
         self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
         self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
 
-        self.batch_pointer = batch_end % self.memory_size
+        self.batch_pointer[0] = batch_end % self.memory_size
 
         if batch_end >= self.memory_size:
             self.batch_full = True
@@ -264,8 +280,8 @@ class BatchNormWithMemory(nn.Module):
             test_mean = self.batch_mu_memory
             test_var = self.batch_var_memory
         else:
-            test_mean = self.batch_mu_memory[:self.batch_pointer, :]
-            test_var = self.batch_var_memory[:self.batch_pointer, :]
+            test_mean = self.batch_mu_memory[:self.batch_pointer.item(), :]
+            test_var = self.batch_var_memory[:self.batch_pointer.item(), :]
 
         test_mean = torch.mean(test_mean, 0)
         test_var = torch.mean(test_var, 0)
@@ -281,14 +297,51 @@ class BatchNormWithMemory(nn.Module):
                 + (1 - prior_var) * test_var
             )
         elif self.use_binary_select:
+            """
             test_mean, test_var = self.binary_selection(self.layer.src_running_mean,
                                                         self.layer.src_running_var,
                                                         test_mean, test_var, self.std_threshold)
-        elif self.pred_module_type == 1 or self.pred_module_type == 2:
-            if self.pred_module_type == 1:
+            """
+            mixed_mean = (
+                self.use_prior * self.layer.src_running_mean
+                + (1 - self.use_prior) * test_mean
+            )
+            mixed_var = (
+                self.use_prior * self.layer.src_running_var
+                + (1 - self.use_prior) * test_var
+            )
+            if self.use_binary_select == 1:
+                test_mean, test_var = self.binary_selection(self.layer.src_running_mean,
+                                                            self.layer.src_running_var,
+                                                            test_mean, test_var, self.std_threshold)
+            elif self.use_binary_select == 2:
+                test_mean, test_var = self.binary_selection(test_mean, test_var,
+                                                            self.layer.src_running_mean,
+                                                            self.layer.src_running_var,
+                                                            self.std_threshold)
+            elif self.use_binary_select == 3:
+                test_mean, test_var = self.binary_selection(mixed_mean, mixed_var,
+                                                            test_mean, test_var, self.std_threshold)
+            elif self.use_binary_select == 4:
+                test_mean, test_var = self.binary_selection(test_mean, test_var,
+                                                            mixed_mean, mixed_var, self.std_threshold)
+            elif self.use_binary_select == 5:
+                test_mean, test_var = self.binary_selection(self.layer.src_running_mean,
+                                                            self.layer.src_running_var,
+                                                            mixed_mean, mixed_var, self.std_threshold)
+            elif self.use_binary_select == 6:
+                test_mean, test_var = self.binary_selection(mixed_mean, mixed_var,
+                                                            self.layer.src_running_mean,
+                                                            self.layer.src_running_var,
+                                                            self.std_threshold)
+            else:
+                raise NotImplemented
+
+        elif self.pred_module_type == 1 or self.pred_module_type == 2 or self.pred_module_type == 5 or self.pred_module_type == 6:
+            if self.pred_module_type == 1 or self.pred_module_type == 5:
                 module_input1 = torch.cat((test_mean, self.layer.src_running_mean))
                 module_input2 = torch.cat((test_var, self.layer.src_running_var))
-            elif self.pred_module_type == 2:
+            elif self.pred_module_type == 2 or self.pred_module_type == 6:
                 module_input1 = torch.cat((batch_mu, test_mean, self.layer.src_running_mean))
                 module_input2 = torch.cat((batch_var, test_var, self.layer.src_running_var))
             else:
@@ -308,10 +361,10 @@ class BatchNormWithMemory(nn.Module):
                 alpha_var * self.layer.src_running_var
                 + (1 - alpha_var) * test_var
             )
-        elif self.pred_module_type == 3 or self.pred_module_type == 4:
-            if self.pred_module_type == 3:
+        elif self.pred_module_type == 3 or self.pred_module_type == 4 or self.pred_module_type == 7 or self.pred_module_type == 8:
+            if self.pred_module_type == 3 or self.pred_module_type == 7:
                 module_input = torch.cat((test_mean, self.layer.src_running_mean, test_var, self.layer.src_running_var))
-            elif self.pred_module_type == 4:
+            elif self.pred_module_type == 4 or self.pred_module_type == 8:
                 module_input = torch.cat((batch_mu, test_mean, self.layer.src_running_mean, batch_var, test_var, self.layer.src_running_var))
             else:
                 raise NotImplemented
