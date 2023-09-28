@@ -1,6 +1,13 @@
 *.tar.gz
+*.ipynb
+
 dataset/*
 log/
-raw_logs/
+raw_logs*/
+my_log/
+ckpt/
+
 
 __pycache__/
+cached_data/
+.ipynb_checkpoints/
