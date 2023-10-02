@@ -273,7 +273,7 @@ class BatchNormWithMemory(nn.Module):
         self.batch_pointer[0] = batch_end % self.memory_size
 
         if batch_end >= self.memory_size:
-            self.batch_full = True
+            self.batch_full[0] = True
 
         # compute test mu and variance from in-memory elements
         if self.batch_full:
