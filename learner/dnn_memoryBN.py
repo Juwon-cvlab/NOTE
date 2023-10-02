@@ -2,6 +2,8 @@ import conf
 from .dnn import DNN
 from torch.utils.data import DataLoader
 
+import torch.optim as optim
+
 from utils.loss_functions import *
 
 from models.norm_layer import adapt_memory_bn, WeightPredictionModule
