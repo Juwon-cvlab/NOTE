@@ -82,6 +82,23 @@ class CIFAR10Dataset(torch.utils.data.Dataset):
 
         elif transform == 'val':
             self.transform = None
+
+        # From EcoTTA paper
+        elif transform == 'aug-v1':
+            self.transform = transforms.Compose([
+                transforms.RandomApply([transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)], p=0.4),
+                transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3,3), sigma=(0.1, 2.0))], p=0.2),
+                transforms.RandomGrayscale(p=0.1)
+            ])
+
+        # From SWR paper
+        elif transform == 'aug-v2':
+            self.transform = transforms.Compose([
+                transforms.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2),
+                transforms.RandomChoice(transforms=[transforms.RandomGrayscale(p=0.5), transforms.RandomInvert(p=0.5)], p=[0.5, 0.5]),
+                transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3,3), sigma=(1.0, 2.0))], p=0.5)
+            ])
+
         else:
             raise NotImplementedError
 

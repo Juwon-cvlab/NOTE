@@ -112,7 +112,7 @@ def save_cache(loaded_data, dataset, cond, data_file_path, transform=None):
 
 def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=np.inf, valid_max_rows=np.inf,
                        test_max_rows=np.inf, valid_split=0, test_split=0, is_src=True,
-                       num_source=9999):
+                       num_source=9999, aug_type=0):
     entire_datasets = []
     train_datasets = []
 
@@ -150,6 +150,10 @@ def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=n
         cond = processed_domains
 
         transform = 'src' if is_src else 'val'
+        if aug_type == 1:
+            transform = 'aug-v1'
+        elif aug_type == 2:
+            transform = 'aug-v2'
         loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
 
         if not loaded_data:
