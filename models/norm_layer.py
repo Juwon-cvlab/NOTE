@@ -404,6 +404,11 @@ class BatchNormWithMemory(nn.Module):
 
             return input
         else:
+            input = (input - test_mean[None, :, None, None]) / (torch.sqrt(test_var[None, :, None, None] + self.layer.eps))
+            input = input * self.layer.weight[None, :, None, None] + self.layer.bias[None, :, None, None]
+            return input
+
+            """
             return F.batch_norm(
                 input,
                 test_mean,
@@ -414,6 +419,7 @@ class BatchNormWithMemory(nn.Module):
                 0,
                 self.layer.eps
             )
+            """
 
     def dynamic_weight(self, test_mu, test_var):
         # TODO: layer-wise interpolation

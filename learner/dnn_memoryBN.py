@@ -41,3 +41,30 @@ class DNNmemoryBN(DNN):
             elif isinstance(module, WeightPredictionModule):
                 for param in module.parameters():
                     param.requires_grad = True
+        
+        # re-init criterions, optimizers, scheduler
+        if conf.args.method == 'Src' or conf.args.method == 'Tgt_memoryBN':
+            if conf.args.dataset in ['cifar10', 'cifar100', 'harth', 'reallifehar', 'extrasensory']:
+                self.optimizer = torch.optim.SGD(
+                                  self.net.parameters(),
+                                  conf.args.opt['learning_rate'],
+                                  momentum=conf.args.opt['momentum'],
+                                  weight_decay=conf.args.opt['weight_decay'],
+                                  nesterov=True)
+
+                self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=conf.args.epoch * len(self.source_dataloader['train']))
+            elif conf.args.dataset in ['tinyimagenet']:
+                    self.optimizer = torch.optim.SGD(
+                        self.net.parameters(),
+                        conf.args.opt['learning_rate'],
+                        momentum=conf.args.opt['momentum'],
+                        weight_decay=conf.args.opt['weight_decay'],
+                        nesterov=True)
+            else:
+                self.optimizer = optim.Adam(self.net.parameters(), lr=conf.args.opt['learning_rate'],
+                                            weight_decay=conf.args.opt['weight_decay'])
+        else:
+            self.optimizer = optim.Adam(self.net.parameters(), lr=conf.args.opt['learning_rate'],
+                                    weight_decay=conf.args.opt['weight_decay'])
+
+
