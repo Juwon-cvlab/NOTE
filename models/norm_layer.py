@@ -183,11 +183,11 @@ class BatchNormWithMemory(nn.Module):
             self.pred_module.to(self.layer.weight.device)
         
     def reset(self):
-        self.pointer = 0
-        self.full = False
+        # self.pointer = 0
+        # self.full = False
 
-        self.batch_pointer = 0
-        self.batch_full = False
+        self.batch_pointer[0] = 0
+        self.batch_full[0] = False
 
     def get_stat_of_mem(self, std=False):
         mem_mean, mem_var = self.get_batch_mu_and_var()
