@@ -32,8 +32,9 @@ def get_path():
     elif conf.args.src is not None and len(conf.args.src) >= 1:
         path += 'src_' + '_'.join(conf.args.src) + '/'
 
-    if conf.args.tgt:
-        path += 'tgt_' + conf.args.tgt + '/'
+    # if conf.args.tgt:
+    #     path += 'tgt_' + conf.args.tgt + '/'
+    path += 'tgt_continual' + '/'
 
     path += conf.args.log_prefix + '/'
 
@@ -65,6 +66,7 @@ def main():
         opt['weight_decay'] = conf.args.weight_decay
     if conf.args.load_checkpoint_path2:
         opt['load_checkpoint_path2'] = conf.args.load_checkpoint_path2
+    conf.args.tgt = opt['tgt_domains'][0]
 
     model = None
 
@@ -124,12 +126,7 @@ def main():
                                                         num_source=conf.args.num_source)
 
     print('##############Target Data Loading...##############')
-    target_data_loader = data_loader.domain_data_loader(conf.args.dataset, conf.args.tgt,
-                                                        conf.args.opt['file_path'],
-                                                        batch_size=conf.args.opt['batch_size'],
-                                                        valid_split=0,
-                                                        test_split=0, is_src=False,
-                                                        num_source=conf.args.num_source)
+    target_data_loader = None
 
     learner = learner_method(model, source_dataloader=source_data_loader,
                              target_dataloader=target_data_loader, write_path=log_path)
@@ -222,29 +219,44 @@ def main():
         print('Best val Acc: {:4f} at Epoch: {:d}'.format(best_acc, best_epoch))
 
     elif conf.args.online == True:
-
-        current_num_sample = 1
-        num_sample_end = conf.args.nsample
         best_acc = -9999
         best_epoch = -1
-
         TRAINED = 0
         SKIPPED = 1
         FINISHED = 2
 
+        for crp_idx, corruption_type in enumerate(opt['tgt_domains']):
+            conf.args.tgt = corruption_type
+            
+            print('##############Target Data Loading...##############')
+            print(corruption_type)
 
-        finished = False
-        while not finished and current_num_sample < num_sample_end:
+            target_data_loader = data_loader.domain_data_loader(conf.args.dataset, corruption_type,
+                                                        conf.args.opt['file_path'],
+                                                        batch_size=conf.args.opt['batch_size'],
+                                                        valid_split=0,
+                                                        test_split=0, is_src=False,
+                                                        num_source=conf.args.num_source)
+        
+            learner.reinit_target_dataloader(target_data_loader)
 
-            ret_val = learner.train_online(current_num_sample)
+            current_num_sample = 1
+            num_sample_end = conf.args.nsample
 
-            if ret_val == FINISHED:
-                break
-            elif ret_val == SKIPPED:
-                pass
-            elif ret_val == TRAINED:
-                pass
-            current_num_sample += 1
+            finished = False
+            while not finished and current_num_sample < num_sample_end:
+
+                ret_val = learner.train_online(current_num_sample)
+
+                if ret_val == FINISHED:
+                    break
+                elif ret_val == SKIPPED:
+                    pass
+                elif ret_val == TRAINED:
+                    pass
+                current_num_sample += 1
+
+            print('Adaptation on {:s} is finished'.format(corruption_type))
 
 
         learner.save_checkpoint(epoch=0, epoch_acc=-1, best_acc=best_acc,
@@ -380,6 +392,9 @@ def parse_arguments(argv):
                         help='Load checkpoint and train from checkpoint in path?')
     
     parser.add_argument('--fill_memory', action='store_true', default=False)
+
+    parser.add_argument('--wandb', action='store_true')
+    parser.add_argument('--wandb_name', type=str, default='temp')
 
     return parser.parse_args()
 
