@@ -205,7 +205,7 @@ def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=n
                                                    drop_last=True,
                                                    shuffle=True)  # Drop_last for avoding one-sized minibatches for batchnorm layers
     else:
-        train_data_loader = datasets_to_dataloader(train_datasets, batch_size=1, concat=True,
+        train_data_loader = datasets_to_dataloader(train_datasets, batch_size=1 if conf.args.dataset != 'imagenet' else batch_size, concat=True,
                                                    drop_last=False,
                                                    shuffle=False)
     valid_data_loader = datasets_to_dataloader(valid_datasets, batch_size=batch_size, concat=True,
