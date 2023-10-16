@@ -65,7 +65,8 @@ def datasets_to_dataloader(datasets, batch_size, concat=True, shuffle=True, drop
             if type(datasets) is torch.utils.data.dataset.Subset:
                 datasets = [datasets]
             if sum([len(dataset) for dataset in datasets]) > 0:  # at least one dataset has data
-                data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size,
+                # data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size,
+                data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size, num_workers=4 if conf.args.dataset == 'imagenet' else 0,
                                          shuffle=shuffle, drop_last=drop_last, pin_memory=False)
         return data_loader
     else:
@@ -294,7 +295,7 @@ def multi_domain_data_loader(dataset, domains, file_path, batch_size, train_max_
     else:
         train_data_loader = datasets_to_dataloader(train_datasets, batch_size=1 if conf.args.dataset != 'imagenet' else batch_size, concat=True,
                                                    drop_last=False,
-                                                   shuffle=False)
+                                                   shuffle=False if conf.args.dataset != 'imagenet' else True)
     valid_data_loader = datasets_to_dataloader(valid_datasets, batch_size=batch_size, concat=True,
                                                shuffle=False)
     test_data_loader = datasets_to_dataloader(test_datasets, batch_size=batch_size, concat=True, shuffle=False)
