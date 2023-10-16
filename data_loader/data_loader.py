@@ -6,6 +6,7 @@ import math
 from .CIFAR10Dataset import CIFAR10Dataset
 from .CIFAR100Dataset import CIFAR100Dataset
 from .ImageNetDataset import ImageNetDataset
+from .MultiCIFAR10Dataset import MultiCIFAR10Dataset
 
 import os
 import pickle
@@ -221,6 +222,91 @@ def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=n
     print('num_domains:' + str(data_loader['num_domains']))
     return data_loader
 
+
+
+
+def multi_domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=np.inf, valid_max_rows=np.inf,
+                       test_max_rows=np.inf, valid_split=0, test_split=0, is_src=True,
+                       num_source=9999, aug_type=0):
+    entire_datasets = []
+    train_datasets = []
+
+    valid_datasets = []
+    test_datasets = []
+    st = time.time()
+
+    if domains is not None:
+        if domains == 'src':
+            processed_domains = conf.args.opt['src_domains']
+        elif isinstance(domains, (list,)):
+            processed_domains = domains
+        else:
+            processed_domains = [domains]
+    else:
+        raise NotImplemented
+    
+    ##-- load dataset per each domain
+    print('Domains:{}'.format(processed_domains))
+
+    loaded_data = None
+
+    if dataset in ['cifar10']:
+        cond = processed_domains
+
+        transform = 'src' if is_src else 'val'
+        if aug_type == 1:
+            transform = 'aug-v1'
+        elif aug_type == 2:
+            transform = 'aug-v2'
+
+        loaded_data = MultiCIFAR10Dataset(file=file_path, domains=cond, max_source=num_source, transform=transform)
+
+    else:
+        raise NotImplemented
+    
+    train_data = loaded_data
+    entire_datasets.append(train_data)
+
+    ##-- split each dataset into train, valid, and test
+    for train_data in entire_datasets:
+        total_len = len(train_data)
+        train_data, valid_data, test_data = split_data(train_data, valid_split, test_split, train_max_rows,
+                                                       valid_max_rows, test_max_rows)
+
+        train_datasets.append(train_data)
+        valid_datasets.append(valid_data)
+        test_datasets.append(test_data)
+
+        print('#Multi?:{:d} data_loader len:{:d} Train: {:d}\t# Valid: {:d}\t# Test: {:d}'.format(
+            True if domains == ['rest'] else False, total_len, len(train_data), len(valid_data),
+            len(test_data)))
+
+    train_datasets = train_datasets[:num_source]
+    valid_datasets = valid_datasets[:num_source]
+    test_datasets = test_datasets[:num_source]
+
+    print('# Time: {:f} secs'.format(time.time() - st))
+
+    if is_src:
+        train_data_loader = datasets_to_dataloader(train_datasets, batch_size=batch_size, concat=True,
+                                                   drop_last=True,
+                                                   shuffle=True)  # Drop_last for avoding one-sized minibatches for batchnorm layers
+    else:
+        train_data_loader = datasets_to_dataloader(train_datasets, batch_size=1 if conf.args.dataset != 'imagenet' else batch_size, concat=True,
+                                                   drop_last=False,
+                                                   shuffle=False)
+    valid_data_loader = datasets_to_dataloader(valid_datasets, batch_size=batch_size, concat=True,
+                                               shuffle=False)
+    test_data_loader = datasets_to_dataloader(test_datasets, batch_size=batch_size, concat=True, shuffle=False)
+
+    data_loader = {
+        'train': train_data_loader,
+        'valid': valid_data_loader,
+        'test': test_data_loader,
+        'num_domains': sum([dataset.dataset.get_num_domains() for dataset in train_datasets]),
+    }
+    print('num_domains:' + str(data_loader['num_domains']))
+    return data_loader
 
 if __name__ == '__main__':
     pass
