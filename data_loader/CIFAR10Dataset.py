@@ -99,6 +99,17 @@ class CIFAR10Dataset(torch.utils.data.Dataset):
                 transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3,3), sigma=(1.0, 2.0))], p=0.5)
             ])
 
+        elif transform == 'aug-v3':
+            self.transform = transforms.Compose([
+                transforms.RandomGrayscale(p=0.8),
+                transforms.RandomInvert(p=0.8)
+            ])
+        
+        elif transform == 'aug-v4':
+            self.transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+            ])
+
         else:
             raise NotImplementedError
 
