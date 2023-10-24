@@ -58,8 +58,8 @@ class ImageNetDataset(datasets.ImageFolder):
         self.domains = domains
         self.file_path = root
 
-    # def get_num_domains(self):
-    #     return len(self.domains)
+    def get_num_domains(self):
+        return len(self.domains)
 
     # def get_datasets_per_domain(self):
     #     return self.datasets
