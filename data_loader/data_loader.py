@@ -58,7 +58,7 @@ def split_data(entire_data, valid_split, test_split, train_max_rows, valid_max_r
     return train_data, valid_data, test_data
 
 
-def datasets_to_dataloader(datasets, batch_size, concat=True, shuffle=True, drop_last=False):
+def datasets_to_dataloader(datasets, batch_size, concat=True, shuffle=True, drop_last=False, num_workers=0):
     if concat:
         data_loader = None
         if len(datasets):
@@ -66,7 +66,7 @@ def datasets_to_dataloader(datasets, batch_size, concat=True, shuffle=True, drop
                 datasets = [datasets]
             if sum([len(dataset) for dataset in datasets]) > 0:  # at least one dataset has data
                 # data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size,
-                data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size, num_workers=4 if conf.args.dataset == 'imagenet' else 0,
+                data_loader = DataLoader(torch.utils.data.ConcatDataset(datasets), batch_size=batch_size, num_workers=4 if conf.args.dataset == 'imagenet' else num_workers,
                                          shuffle=shuffle, drop_last=drop_last, pin_memory=False)
         return data_loader
     else:
@@ -157,6 +157,10 @@ def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=n
             transform = 'aug-v1'
         elif aug_type == 2:
             transform = 'aug-v2'
+        elif aug_type == 3:
+            transform = 'aug-v3'
+        elif aug_type == 5:
+            transform = 'aug-v4'
         loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
 
         if not loaded_data:
@@ -288,6 +292,11 @@ def multi_domain_data_loader(dataset, domains, file_path, batch_size, train_max_
 
     print('# Time: {:f} secs'.format(time.time() - st))
 
+    train_data_loader = datasets_to_dataloader(train_datasets, batch_size=batch_size, concat=True,
+                                                drop_last=True,
+                                                shuffle=True, num_workers=4)  # Drop_last for avoding one-sized minibatches for batchnorm layers
+
+    """
     if is_src:
         train_data_loader = datasets_to_dataloader(train_datasets, batch_size=batch_size, concat=True,
                                                    drop_last=True,
@@ -296,6 +305,8 @@ def multi_domain_data_loader(dataset, domains, file_path, batch_size, train_max_
         train_data_loader = datasets_to_dataloader(train_datasets, batch_size=1 if conf.args.dataset != 'imagenet' else batch_size, concat=True,
                                                    drop_last=False,
                                                    shuffle=False if conf.args.dataset != 'imagenet' else True)
+    """
+
     valid_data_loader = datasets_to_dataloader(valid_datasets, batch_size=batch_size, concat=True,
                                                shuffle=False)
     test_data_loader = datasets_to_dataloader(test_datasets, batch_size=batch_size, concat=True, shuffle=False)
