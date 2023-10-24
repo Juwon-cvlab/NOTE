@@ -400,6 +400,22 @@ class BatchNormWithMemory(nn.Module):
             return self.batch_mu_memory, self.batch_var_memory
         return self.batch_mu_memory[:self.batch_pointer.item()], self.batch_var_memory[:self.batch_pointer.item()]
 
+    def get_aggreated_statistics(self):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        if conf.args.add_correction_term1:
+            first = torch.mean(mem_var, 0)
+            second = torch.mean(mem_mean * mem_mean, 0)
+            third = mem_mean.mean(0) * mem_mean.mean(0)
+
+            test_var = first + second - third
+            test_mean = torch.mean(mem_mean, 0)
+        else:
+            test_mean = torch.mean(mem_mean, 0)
+            test_var = torch.mean(mem_var, 0)
+
+        return test_mean, test_var
+
     def forward(self, input):
         # self._check_input_dim(input)
         
@@ -443,7 +459,7 @@ class BatchNormWithMemory(nn.Module):
             test_var = torch.mean(test_var, 0)
 
         if self.use_dynamic_weight:
-            prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var)
+            prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
             test_mean, test_var = calculate_weighted_stat(self.layer.src_running_mean, self.layer.src_running_var,
                                                          test_mean, test_var, prior_mu, prior_var)
             """
@@ -605,14 +621,12 @@ class BatchNormWithMemory(nn.Module):
             )
             """
 
-    def dynamic_weight(self, test_mu, test_var):
+    def dynamic_weight(self, test_mu, test_var, mem_mean, mem_var):
+        if not self.batch_full and self.batch_pointer == 1: # just only one iem,
+            return 0.5, 0.5
         # TODO: layer-wise interpolation
         test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0)).squeeze()
         test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0)).squeeze()
-
-        mem_mean, mem_var = self.get_batch_mu_and_var()
-        mem_mean = torch.mean(mem_mean, 0)
-        mem_var = torch.mean(mem_var, 0)
 
         test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0)).squeeze()
         test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0)).squeeze()
@@ -638,8 +652,6 @@ class BatchNormWithMemory(nn.Module):
         if conf.args.gamma != 1.0:
             prior = prior ** conf.args.gamma
         prior = prior.detach()
-
-        print(prior.item())
 
         self.last_prior_mu = prior
         self.last_prior_var = prior
