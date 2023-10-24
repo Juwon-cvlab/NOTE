@@ -6,7 +6,7 @@ import torch.optim as optim
 
 from utils.loss_functions import *
 
-from models.norm_layer import adapt_memory_bn, WeightPredictionModule
+from models.norm_layer import adapt_memory_bn, WeightPredictionModule, WeightPredictionModule2 
 
 device = torch.device("cuda:{:d}".format(conf.args.gpu_idx) if torch.cuda.is_available() else "cpu")
 
@@ -40,7 +40,7 @@ class DNNmemoryBN(DNN):
 
                 module.running_mean = None
                 module.running_var = None
-            elif isinstance(module, WeightPredictionModule):
+            elif isinstance(module, WeightPredictionModule) or isinstance(module, WeightPredictionModule2):
                 for param in module.parameters():
                     param.requires_grad = True
         
