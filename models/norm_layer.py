@@ -265,7 +265,16 @@ class BatchNormWithMemory(nn.Module):
         print(f"| Found {len(replace_mods)} modules to be replaced.")
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
+
+        for bn_idx, (_, _, child) in enumerate(replace_mods):
+            subsequent_bn_layers = [bn for _, _, bn in replace_mods[bn_idx+1:]]
+            setattr(child, 'remaining_bns', subsequent_bn_layers)
+
         return model
+    
+    def reset_subsequent_bns(self):
+        for memory_bn in self.remaining_bns:
+            memory_bn.reset()
 
     def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
                  use_dynamic_weight=False, use_binary_select=False, std_threshold=1.0, pred_module_type=0, push_last=False):
@@ -446,6 +455,9 @@ class BatchNormWithMemory(nn.Module):
         if self.batch_full:
             test_mean = self.batch_mu_memory
             test_var = self.batch_var_memory
+        elif self.batch_pointer == 0:
+            test_mean = batch_mu.unsqueeze(0)
+            test_var = batch_var.unsqueeze(0)
         else:
             test_mean = self.batch_mu_memory[:self.batch_pointer.item(), :]
             test_var = self.batch_var_memory[:self.batch_pointer.item(), :]
@@ -462,6 +474,9 @@ class BatchNormWithMemory(nn.Module):
         else:
             test_mean = torch.mean(test_mean, 0)
             test_var = torch.mean(test_var, 0)
+
+        if self.batch_full or self.batch_pointer > 10:
+            self.detect_domain_shift(batch_mu, batch_var, test_mean, test_var)
 
         if self.use_dynamic_weight:
             prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
@@ -498,6 +513,22 @@ class BatchNormWithMemory(nn.Module):
             input = (input - test_mean[None, :, None, None]) / (torch.sqrt(test_var[None, :, None, None] + self.layer.eps))
             input = input * self.layer.weight[None, :, None, None] + self.layer.bias[None, :, None, None]
             return input
+    
+    def detect_domain_shift(self, test_mu, test_var, global_mu, global_var):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        dist_mean_m2avg = torch.cdist(mem_mean, global_mu.unsqueeze(0)).squeeze()
+        dist_var_m2avg = torch.cdist(mem_var, global_var.unsqueeze(0)).squeeze()
+
+        var_dist_mean_m2avg, mean_dist_mean_m2avg = torch.var_mean(dist_mean_m2avg)
+        var_dist_var_m2avg, mean_dist_var_m2avg = torch.var_mean(dist_var_m2avg)
+
+        dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
+        dist_var_b2avg = torch.cdist(test_var.unsqueeze(0), global_var.unsqueeze(0)).squeeze()
+
+        if (torch.abs(mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold or 
+            torch.abs(mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) > conf.args.threshold):
+            self.reset_subsequent_bns()
 
     def dynamic_weight(self, test_mu, test_var, mem_mean, mem_var):
         if self.push_last and not self.batch_full and self.batch_pointer == 0: # no item,
@@ -524,6 +555,35 @@ class BatchNormWithMemory(nn.Module):
         return prior_mu, prior_var
         """
 
+        """
+        test2src_total = test2src_mu + test2src_var
+        test2mem_total = test2mem_mu + test2mem_var
+
+        self.last_t2src_total = test2src_total.detach()
+        self.last_t2src_mu = test2src_mu.detach()
+        self.last_t2src_var = test2src_var.detach()
+
+        self.last_t2mem_total = test2mem_total.detach()
+        self.last_t2mem_mu = test2mem_mu.detach()
+        self.last_t2mem_var = test2mem_var.detach()
+
+        prior = 1 - test2src_total / (test2src_total + test2mem_total)
+        prior = prior.detach()
+
+        if conf.args.gamma != 1.0:
+            prior = prior ** conf.args.gamma
+
+        prior_mu = 1 - test2src_mu / (test2src_mu + test2mem_mu)
+        prior_mu = prior_mu.detach()
+
+        prior_var = 1 - test2src_var / (test2src_var + test2mem_var)
+        prior_var = prior_var.detach()
+
+        self.last_prior = prior
+        self.last_prior_mu = prior_mu
+        self.last_prior_var = prior_var
+        """
+
         test2src = test2src_mu + test2src_var
         test2mem = test2mem_mu + test2mem_var
 
@@ -535,7 +595,7 @@ class BatchNormWithMemory(nn.Module):
         self.last_prior_mu = prior
         self.last_prior_var = prior
         
-        if not self.push_last and not self.batch_full and self.batch_pointer == 1: # just only one item and the same feature as mem and in_batch,
+        if not self.push_last and not self.batch_full and self.batch_pointer == 1: # just only one item,
             return 0.5, 0.5
 
         return prior, prior
