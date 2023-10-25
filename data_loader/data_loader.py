@@ -115,7 +115,7 @@ def save_cache(loaded_data, dataset, cond, data_file_path, transform=None):
 
 def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=np.inf, valid_max_rows=np.inf,
                        test_max_rows=np.inf, valid_split=0, test_split=0, is_src=True,
-                       num_source=9999, aug_type=0):
+                       num_source=9999, aug_type=0, mixed=False):
     entire_datasets = []
     train_datasets = []
 
@@ -148,43 +148,72 @@ def domain_data_loader(dataset, domains, file_path, batch_size, train_max_rows=n
 
     loaded_data = None
 
-    if dataset in ['cifar10']:
+    if not mixed:
+        if dataset in ['cifar10']:
 
-        cond = processed_domains
+            cond = processed_domains
 
-        transform = 'src' if is_src else 'val'
-        if aug_type == 1:
-            transform = 'aug-v1'
-        elif aug_type == 2:
-            transform = 'aug-v2'
-        elif aug_type == 3:
-            transform = 'aug-v3'
-        elif aug_type == 5:
-            transform = 'aug-v4'
-        loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
+            transform = 'src' if is_src else 'val'
+            if aug_type == 1:
+                transform = 'aug-v1'
+            elif aug_type == 2:
+                transform = 'aug-v2'
+            elif aug_type == 3:
+                transform = 'aug-v3'
+            elif aug_type == 5:
+                transform = 'aug-v4'
 
-        if not loaded_data:
-            loaded_data = CIFAR10Dataset(file=file_path, domains=cond, max_source=num_source, transform=transform)
-            save_cache(loaded_data, dataset, processed_domains, file_path, transform=transform)
+            loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
 
-    elif dataset in ['cifar100']:
+            if not loaded_data:
+                loaded_data = CIFAR10Dataset(file=file_path, domains=cond, max_source=num_source, transform=transform)
+                save_cache(loaded_data, dataset, processed_domains, file_path, transform=transform)
 
-        cond = processed_domains
+        elif dataset in ['cifar100']:
 
-        transform = 'src' if is_src else 'val'
-        loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
+            cond = processed_domains
 
-        if not loaded_data:
-            loaded_data = CIFAR100Dataset(file=file_path, domains=cond, max_source=num_source, transform=transform)
-            save_cache(loaded_data, dataset, processed_domains, file_path, transform=transform)
-    
-    elif dataset in ['imagenet']:
-        cond = processed_domains
-        transform = 'train' if is_src else 'test_v2'
-        loaded_data = ImageNetDataset(domains=cond, transform=transform)
+            transform = 'src' if is_src else 'val'
+            loaded_data = load_cache(dataset, processed_domains, file_path, transform=transform)
 
-    train_data = loaded_data
-    entire_datasets.append(train_data)
+            if not loaded_data:
+                loaded_data = CIFAR100Dataset(file=file_path, domains=cond, max_source=num_source, transform=transform)
+                save_cache(loaded_data, dataset, processed_domains, file_path, transform=transform)
+        
+        elif dataset in ['imagenet']:
+            cond = processed_domains
+            transform = 'train' if is_src else 'test_v2'
+            loaded_data = ImageNetDataset(domains=cond, transform=transform)
+
+        train_data = loaded_data
+        entire_datasets.append(train_data)
+
+    # mixed domain shfit case, multi dataset are loaded
+    else:
+        if dataset in ['cifar10']:
+
+            transform = 'src' if is_src else 'val'
+            if aug_type == 1:
+                transform = 'aug-v1'
+            elif aug_type == 2:
+                transform = 'aug-v2'
+            elif aug_type == 3:
+                transform = 'aug-v3'
+            elif aug_type == 5:
+                transform = 'aug-v4'
+
+            for domain_idx, cond in enumerate(processed_domains):
+                loaded_data = load_cache(dataset, [cond], file_path, transform=transform)
+
+                if not loaded_data:
+                    # loaded_data = CIFAR10Dataset(file=file_path, domains=[cond], max_source=num_source, transform=transform, domain_label=domain_idx)
+                    loaded_data = CIFAR10Dataset(file=file_path, domains=[cond], max_source=num_source, transform=transform)
+                    save_cache(loaded_data, dataset, [cond], file_path, transform=transform)
+                
+                entire_datasets.append(loaded_data)
+        else:
+            raise NotImplemented
+
 
     ##-- split each dataset into train, valid, and test
     for train_data in entire_datasets:
