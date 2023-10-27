@@ -266,9 +266,15 @@ class BatchNormWithMemory(nn.Module):
         for (parent, name, child) in replace_mods:
             setattr(parent, name, child)
 
+        """
         for bn_idx, (_, _, child) in enumerate(replace_mods):
             subsequent_bn_layers = [bn for _, _, bn in replace_mods[bn_idx+1:]]
             setattr(child, 'remaining_bns', subsequent_bn_layers)
+        """
+        
+        for _, (_, _, child) in enumerate(replace_mods):
+            all_memorybn_layers = [bn for _, _, bn in replace_mods]
+            setattr(child, 'remaining_bns', all_memorybn_layers)
 
         return model
     
@@ -303,6 +309,11 @@ class BatchNormWithMemory(nn.Module):
 
         self.use_dynamic_weight = use_dynamic_weight
         self.push_last = push_last
+
+        self.event_count1 = 0
+        self.event_count2 = 0
+        self.event_count3 = 0
+        self.event_count4 = 0
 
         """
         self.use_binary_select = use_binary_select
@@ -526,9 +537,28 @@ class BatchNormWithMemory(nn.Module):
         dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
         dist_var_b2avg = torch.cdist(test_var.unsqueeze(0), global_var.unsqueeze(0)).squeeze()
 
-        if (torch.abs(mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold or 
-            torch.abs(mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) > conf.args.threshold):
+        condition1 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold
+        condition2 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) < -1 * conf.args.threshold
+
+        condition3 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) > conf.args.threshold
+        condition4 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) < -1 * conf.args.threshold
+
+        if condition1 or condition2 or condition3 or condition4:
             self.reset_subsequent_bns()
+
+            if condition1:
+                self.event_count1 = self.event_count1 + 1
+
+            if condition2:
+                self.event_count2 = self.event_count2 + 1
+
+            if condition3:
+                self.event_count3 = self.event_count3 + 1
+
+            if condition4:
+                self.event_count4 = self.event_count4 + 1
+
+            print("domain_shift is detected ", self.event_count1, self.event_count2, self.event_count3, self.event_count4)
 
     def dynamic_weight(self, test_mu, test_var, mem_mean, mem_var):
         if self.push_last and not self.batch_full and self.batch_pointer == 0: # no item,
