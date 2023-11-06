@@ -315,6 +315,8 @@ class BatchNormWithMemory(nn.Module):
         self.event_count3 = 0
         self.event_count4 = 0
 
+        self.save_stat = True
+
         """
         self.use_binary_select = use_binary_select
         self.std_threshold = std_threshold
@@ -351,6 +353,9 @@ class BatchNormWithMemory(nn.Module):
 
             self.pred_module.to(self.layer.weight.device)
         """
+
+    def set_save_stat(self, save_stat):
+        self.save_stat = save_stat
         
     def reset(self):
         # self.pointer = 0
@@ -448,7 +453,7 @@ class BatchNormWithMemory(nn.Module):
         batch_var = input.var([0, 2, 3], unbiased=False)
         # batch_num = 1
 
-        if not self.push_last:
+        if not self.push_last and self.save_stat:
             # save mu and variance in memory
             batch_start = self.batch_pointer.item()
             batch_end = self.batch_pointer.item() + 1
@@ -501,7 +506,7 @@ class BatchNormWithMemory(nn.Module):
                                                               test_mean, test_var,
                                                               self.use_prior)
         
-        if self.push_last:
+        if self.push_last and self.save_stat:
             # save mu and variance in memory
             batch_start = self.batch_pointer.item()
             batch_end = self.batch_pointer.item() + 1
