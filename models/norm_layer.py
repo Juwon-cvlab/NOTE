@@ -491,7 +491,7 @@ class BatchNormWithMemory(nn.Module):
             test_mean = torch.mean(test_mean, 0)
             test_var = torch.mean(test_var, 0)
 
-        if self.batch_full or self.batch_pointer > 10:
+        if self.batch_full or self.batch_pointer > 10 and self.save_stat:
             self.detect_domain_shift(batch_mu, batch_var, test_mean, test_var)
 
         if self.use_dynamic_weight:
@@ -659,6 +659,337 @@ class BatchNormWithMemory(nn.Module):
         self.last_prior_var = out_var
 
         return output_mu, output_var
+
+
+class BatchNormWithMultiMemory(nn.Module):
+    @staticmethod
+    def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, push_last=False):
+        replace_mods = []
+        if parent is None:
+            return []
+        for name, child in parent.named_children():
+            # child.requires_grad_(False)
+            if isinstance(child, nn.BatchNorm2d):
+                module = BatchNormWithMultiMemory(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                             use_dynamic_weight, push_last)
+                replace_mods.append((parent, name, module))
+            else:
+                replace_mods.extend(BatchNormWithMultiMemory.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                                                 use_dynamic_weight, push_last))
+    
+        return replace_mods
+
+    @staticmethod
+    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                    use_dynamic_weight=False, push_last=False):
+        replace_mods = BatchNormWithMultiMemory.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer,
+                                                    use_dynamic_weight=use_dynamic_weight, push_last=push_last)
+        print(f"| Found {len(replace_mods)} modules to be replaced.")
+        for (parent, name, child) in replace_mods:
+            setattr(parent, name, child)
+        
+        for _, (_, _, child) in enumerate(replace_mods):
+            all_memorybn_layers = [bn for _, _, bn in replace_mods]
+            setattr(child, 'remaining_bns', all_memorybn_layers)
+
+        return model
+    
+    def reset_subsequent_bns(self):
+        for memory_bn in self.remaining_bns:
+            memory_bn.reset()
+
+    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, push_last=False):
+        super().__init__()
+
+        self.layer = layer
+
+        self.memory_size = memory_size
+        self.use_prior = use_prior
+        self.batch_renorm = batch_renorm
+
+        self.unbiased = False
+
+        batch_mu_memory1 = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        batch_var_memory1 = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.register_buffer('batch_mu_memory1', batch_mu_memory1)
+        self.register_buffer('batch_var_memory1', batch_var_memory1)
+
+        batch_pointer1 = torch.zeros(1, dtype=torch.int)
+        self.register_buffer('batch_pointer1', batch_pointer1)
+
+        batch_full1 = torch.zeros(1, dtype=torch.bool)
+        self.register_buffer('batch_full1', batch_full1)
+
+        batch_mu_memory2 = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        batch_var_memory2 = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.register_buffer('batch_mu_memory2', batch_mu_memory2)
+        self.register_buffer('batch_var_memory2', batch_var_memory2)
+
+        batch_pointer2 = torch.zeros(1, dtype=torch.int)
+        self.register_buffer('batch_pointer2', batch_pointer2)
+
+        batch_full2 = torch.zeros(1, dtype=torch.bool)
+        self.register_buffer('batch_full2', batch_full2)
+
+        self.save_stat1 = True
+        self.save_stat2 = True
+
+        self.use_ith_memory(0)
+
+        self.add_eps_numer = add_eps_numer
+
+        self.use_dynamic_weight = use_dynamic_weight
+        self.push_last = push_last
+
+        self.event_count1 = 0
+        self.event_count2 = 0
+        self.event_count3 = 0
+        self.event_count4 = 0
+
+        # self.save_stat = True
+
+    def use_ith_memory(self, index):
+        if index == 0:
+            self.batch_pointer = self.batch_pointer1
+            self.batch_full = self.batch_full1
+            self.batch_mu_memory = self.batch_mu_memory1
+            self.batch_var_memory = self.batch_var_memory1
+
+            self.save_stat = self.save_stat1
+        elif index == 1:
+            self.batch_pointer = self.batch_pointer2
+            self.batch_full = self.batch_full2
+            self.batch_mu_memory = self.batch_mu_memory2
+            self.batch_var_memory = self.batch_var_memory2
+
+            self.save_stat = self.save_stat2
+        else:
+            raise NotImplemented
+
+    def set_save_stat(self, save_stat):
+        self.save_stat = save_stat
+        
+    def reset(self):
+        self.batch_pointer[0] = 0
+        self.batch_full[0] = False
+
+        # self.batch_pointer1[0] = 0
+        # self.batch_full1[0] = False
+
+        # self.batch_pointer2[0] = 0
+        # self.batch_full2[0] = False
+
+    def get_batch_mu_and_var(self):
+        if self.batch_full:
+            return self.batch_mu_memory, self.batch_var_memory
+        return self.batch_mu_memory[:self.batch_pointer.item()], self.batch_var_memory[:self.batch_pointer.item()]
+
+    def get_aggreated_statistics(self):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        if conf.args.add_correction_term1:
+            first = torch.mean(mem_var, 0)
+            second = torch.mean(mem_mean * mem_mean, 0)
+            third = mem_mean.mean(0) * mem_mean.mean(0)
+
+            test_var = first + second - third
+            test_mean = torch.mean(mem_mean, 0)
+        else:
+            test_mean = torch.mean(mem_mean, 0)
+            test_var = torch.mean(mem_var, 0)
+
+        return test_mean, test_var
+
+    def forward(self, input):
+        # self._check_input_dim(input)
+        
+        # TODO: use mean_and_var or batch_norm(trainaing=True, momentum=1.0)???
+        batch_mu = input.mean([0, 2, 3])
+        batch_var = input.var([0, 2, 3], unbiased=False)
+        # batch_num = 1
+
+        if not self.push_last and self.save_stat:
+            # save mu and variance in memory
+            batch_start = self.batch_pointer.item()
+            batch_end = self.batch_pointer.item() + 1
+            batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
+
+            self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
+            self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
+
+            self.batch_pointer[0] = batch_end % self.memory_size
+
+            if batch_end >= self.memory_size:
+                self.batch_full[0] = True
+
+        # compute test mu and variance from in-memory elements
+        if self.batch_full:
+            test_mean = self.batch_mu_memory
+            test_var = self.batch_var_memory
+        elif self.batch_pointer == 0:
+            test_mean = batch_mu.unsqueeze(0)
+            test_var = batch_var.unsqueeze(0)
+        else:
+            test_mean = self.batch_mu_memory[:self.batch_pointer.item(), :]
+            test_var = self.batch_var_memory[:self.batch_pointer.item(), :]
+
+        # test_mean = torch.mean(test_mean, 0)
+        # test_var = torch.mean(test_var, 0)
+        if conf.args.add_correction_term1:
+            first = torch.mean(test_var, 0)
+            second = torch.mean(test_mean * test_mean, 0)
+            third = test_mean.mean(0) * test_mean.mean(0)
+            test_var = first + second - third
+
+            test_mean = torch.mean(test_mean, 0)
+        else:
+            test_mean = torch.mean(test_mean, 0)
+            test_var = torch.mean(test_var, 0)
+
+        if self.batch_full or self.batch_pointer > 10 and self.save_stat:
+            self.detect_domain_shift2(batch_mu, batch_var, test_mean, test_var)
+
+        if self.use_dynamic_weight:
+            prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
+            test_mean, test_var = calculate_weighted_stat(self.layer.src_running_mean, self.layer.src_running_var,
+                                                         test_mean, test_var, prior_mu, prior_var)
+        else:
+            ### just for calculating distance and prior
+            # self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
+            if self.use_prior:
+                test_mean, test_var = calculate_weighted_stat(self.layer.src_running_mean, self.layer.src_running_var,
+                                                              test_mean, test_var,
+                                                              self.use_prior)
+        
+        if self.push_last and self.save_stat:
+            # save mu and variance in memory
+            batch_start = self.batch_pointer.item()
+            batch_end = self.batch_pointer.item() + 1
+            batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
+
+            self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
+            self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
+
+            self.batch_pointer[0] = batch_end % self.memory_size
+
+            if batch_end >= self.memory_size:
+                self.batch_full[0] = True
+        
+        if self.batch_renorm:
+            input = BatchRenorm(input, test_mean, test_var, self.layer.eps, self.add_eps_numer)
+            input = self.layer.weight[None, :, None, None] * input + self.layer.bias[None, :, None, None]
+
+            return input
+        else:
+            input = (input - test_mean[None, :, None, None]) / (torch.sqrt(test_var[None, :, None, None] + self.layer.eps))
+            input = input * self.layer.weight[None, :, None, None] + self.layer.bias[None, :, None, None]
+            return input
+    
+    def detect_domain_shift(self, test_mu, test_var, global_mu, global_var):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        dist_mean_m2avg = torch.cdist(mem_mean, global_mu.unsqueeze(0)).squeeze()
+        dist_var_m2avg = torch.cdist(mem_var, global_var.unsqueeze(0)).squeeze()
+
+        var_dist_mean_m2avg, mean_dist_mean_m2avg = torch.var_mean(dist_mean_m2avg)
+        var_dist_var_m2avg, mean_dist_var_m2avg = torch.var_mean(dist_var_m2avg)
+
+        dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
+        dist_var_b2avg = torch.cdist(test_var.unsqueeze(0), global_var.unsqueeze(0)).squeeze()
+
+        condition1 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold
+        condition2 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) < -1 * conf.args.threshold
+
+        condition3 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) > conf.args.threshold
+        condition4 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) < -1 * conf.args.threshold
+
+        if condition1 or condition2 or condition3 or condition4:
+            self.reset_subsequent_bns()
+
+            if condition1:
+                self.event_count1 = self.event_count1 + 1
+
+            if condition2:
+                self.event_count2 = self.event_count2 + 1
+
+            if condition3:
+                self.event_count3 = self.event_count3 + 1
+
+            if condition4:
+                self.event_count4 = self.event_count4 + 1
+
+            print("domain_shift is detected ", self.event_count1, self.event_count2, self.event_count3, self.event_count4)
+
+    
+    def detect_domain_shift2(self, test_mu, test_var, global_mu, global_var):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        mem_std = torch.sqrt(mem_var)
+        global_std = torch.sqrt(global_var)
+        test_std = torch.sqrt(test_var)
+
+        dist_mean_m2avg = torch.cdist(mem_mean, global_mu.unsqueeze(0)).squeeze()
+        dist_std_m2avg = torch.cdist(mem_std, global_std.unsqueeze(0)).squeeze()
+
+        var_dist_mean_m2avg, mean_dist_mean_m2avg = torch.var_mean(dist_mean_m2avg)
+        var_dist_std_m2avg, mean_dist_std_m2avg = torch.var_mean(dist_std_m2avg)
+
+        dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
+        dist_std_b2avg = torch.cdist(test_std.unsqueeze(0), global_std.unsqueeze(0)).squeeze()
+
+        condition1 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold
+        condition2 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) < -1 * conf.args.threshold
+
+        condition3 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) > conf.args.threshold
+        condition4 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) < -1 * conf.args.threshold
+
+        if condition1 or condition2 or condition3 or condition4:
+            self.reset_subsequent_bns()
+
+            if condition1:
+                self.event_count1 = self.event_count1 + 1
+
+            if condition2:
+                self.event_count2 = self.event_count2 + 1
+
+            if condition3:
+                self.event_count3 = self.event_count3 + 1
+
+            if condition4:
+                self.event_count4 = self.event_count4 + 1
+
+            print("domain_shift is detected ", self.event_count1, self.event_count2, self.event_count3, self.event_count4)
+
+    def dynamic_weight(self, test_mu, test_var, mem_mean, mem_var):
+        if self.push_last and not self.batch_full and self.batch_pointer == 0: # no item,
+            return 0.5, 0.5
+        
+        # TODO: layer-wise interpolation
+        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0)).squeeze()
+        test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0)).squeeze()
+
+        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0)).squeeze()
+        test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0)).squeeze()
+
+        # TODO: same weight or separated weight?
+        
+        test2src = test2src_mu + test2src_var
+        test2mem = test2mem_mu + test2mem_var
+
+        prior = 1 - test2src / (test2src + test2mem)
+        if conf.args.gamma != 1.0:
+            prior = prior ** conf.args.gamma
+        prior = prior.detach()
+
+        self.last_prior_mu = prior
+        self.last_prior_var = prior
+        
+        if not self.push_last and not self.batch_full and self.batch_pointer == 1: # just only one item,
+            return 0.5, 0.5
+
+        return prior, prior
 
 def BatchRenorm(batch, new_mu, new_var, eps, add_eps_numer=False):
     # TODO: need to contain eps?

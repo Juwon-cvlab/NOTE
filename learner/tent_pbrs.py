@@ -7,15 +7,20 @@ from utils import memory
 
 from utils.loss_functions import *
 
-from models.norm_layer import BatchNormWithMemory
+from models.norm_layer import BatchNormWithMemory, BatchNormWithMultiMemory
 
 device = torch.device("cuda:{:d}".format(conf.args.gpu_idx) if torch.cuda.is_available() else "cpu")
 from utils.iabn import *
 
 def set_save_stat_in_membn(net, save_stat):
     for m in net.modules():
-        if isinstance(m, BatchNormWithMemory):
+        if isinstance(m, BatchNormWithMemory) or isinstance(m, BatchNormWithMultiMemory):
             m.set_save_stat(save_stat)
+
+def set_ith_memory(net, idx):
+    for m in net.modules():
+        if isinstance(m, BatchNormWithMultiMemory):
+            m.use_ith_memory(idx)
 
 class TENT_PBRS(DNN):
 
@@ -85,6 +90,13 @@ class TENT_PBRS(DNN):
                 logit = self.net(f.unsqueeze(0))
                 pseudo_cls = logit.max(1, keepdim=False)[1][0]
                 self.mem.add_instance([f, pseudo_cls, d, c, 0])
+
+        set_save_stat_in_membn(self.net, True)
+
+        if conf.args.multiple_memory:
+            set_ith_memory(self.net, 1)
+        elif not conf.args.save_eval_stat:
+            set_save_stat_in_membn(self.net, False)
             
         if conf.args.use_learned_stats: #batch-free inference
             self.evaluation_online(current_num_sample, '', [[current_sample[0]], [current_sample[1]], [current_sample[2]]])
@@ -99,7 +111,10 @@ class TENT_PBRS(DNN):
         if not conf.args.use_learned_stats: #batch-based inference
             self.evaluation_online(current_num_sample, '', self.fifo.get_memory())
 
-        set_save_stat_in_membn(self.net, True)
+        if conf.args.multiple_memory:
+            set_ith_memory(self.net, 0)
+        elif not conf.args.save_eval_stat:
+            set_save_stat_in_membn(self.net, True)
 
         if conf.args.no_adapt: # for ablation
             return TRAINED
@@ -113,7 +128,8 @@ class TENT_PBRS(DNN):
         feats, _, _ = self.mem.get_memory()
         feats = torch.stack(feats)
         dataset = torch.utils.data.TensorDataset(feats)
-        data_loader = DataLoader(dataset, batch_size=conf.args.opt['batch_size'],
+        # data_loader = DataLoader(dataset, batch_size=conf.args.opt['batch_size'],
+        data_loader = DataLoader(dataset, batch_size=200,
                                  shuffle=True, drop_last=False, pin_memory=False)
 
         entropy_loss = HLoss(temp_factor=conf.args.temperature)
