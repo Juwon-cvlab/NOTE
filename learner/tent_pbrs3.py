@@ -115,15 +115,12 @@ class TENT_PBRS3(DNN):
 
         return TRAINED
 
-    def _train_online(self, epoch, condition, current_samples, memory_samples):
+    def _train_online(self, epoch, condition, current_samples):
         entropy_loss = HLoss()
 
         features1, cl_labels1, do_labels1 = current_samples
-        features2, cl_labels2, do_labels2 = memory_samples
 
-        current_sample_num = len(features1)
-
-        feats, cls, dls = torch.stack(features1 + features2), torch.stack(cl_labels1 + cl_labels2), torch.stack(do_labels1 + do_labels2)
+        feats, cls, dls = torch.stack(features1), torch.stack(cl_labels1), torch.stack(do_labels1)
         feats, cls, dls = feats.to(device), cls.to(device), dls.to(device)
 
         preds_of_data = self.net(feats)
@@ -137,7 +134,6 @@ class TENT_PBRS3(DNN):
             self.optimizer.step()
 
         # Only count current_samples
-        preds_of_data = preds_of_data[:current_sample_num]
 
         y_pred = preds_of_data.max(1, keepdim=False)[1]
 
