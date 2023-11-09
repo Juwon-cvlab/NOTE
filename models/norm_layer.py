@@ -492,7 +492,7 @@ class BatchNormWithMemory(nn.Module):
             test_var = torch.mean(test_var, 0)
 
         if self.batch_full or self.batch_pointer > 10 and self.save_stat:
-            self.detect_domain_shift(batch_mu, batch_var, test_mean, test_var)
+            self.detect_domain_shift2(batch_mu, batch_var, test_mean, test_var)
 
         if self.use_dynamic_weight:
             prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
@@ -547,6 +547,45 @@ class BatchNormWithMemory(nn.Module):
 
         condition3 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) > conf.args.threshold
         condition4 =  (mean_dist_var_m2avg - dist_var_b2avg) / torch.sqrt(var_dist_var_m2avg) < -1 * conf.args.threshold
+
+        if condition1 or condition2 or condition3 or condition4:
+            self.reset_subsequent_bns()
+
+            if condition1:
+                self.event_count1 = self.event_count1 + 1
+
+            if condition2:
+                self.event_count2 = self.event_count2 + 1
+
+            if condition3:
+                self.event_count3 = self.event_count3 + 1
+
+            if condition4:
+                self.event_count4 = self.event_count4 + 1
+
+            print("domain_shift is detected ", self.event_count1, self.event_count2, self.event_count3, self.event_count4)
+
+    def detect_domain_shift2(self, test_mu, test_var, global_mu, global_var):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        mem_std = torch.sqrt(mem_var)
+        global_std = torch.sqrt(global_var)
+        test_std = torch.sqrt(test_var)
+
+        dist_mean_m2avg = torch.cdist(mem_mean, global_mu.unsqueeze(0)).squeeze()
+        dist_std_m2avg = torch.cdist(mem_std, global_std.unsqueeze(0)).squeeze()
+
+        var_dist_mean_m2avg, mean_dist_mean_m2avg = torch.var_mean(dist_mean_m2avg)
+        var_dist_std_m2avg, mean_dist_std_m2avg = torch.var_mean(dist_std_m2avg)
+
+        dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
+        dist_std_b2avg = torch.cdist(test_std.unsqueeze(0), global_std.unsqueeze(0)).squeeze()
+
+        condition1 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold
+        condition2 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) < -1 * conf.args.threshold
+
+        condition3 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) > conf.args.threshold
+        condition4 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) < -1 * conf.args.threshold
 
         if condition1 or condition2 or condition3 or condition4:
             self.reset_subsequent_bns()
@@ -855,7 +894,7 @@ class BatchNormWithMemory2(nn.Module):
         test_mean = torch.mean(test_mean, 0)
 
         if self.batch_full or self.batch_pointer > 10 and self.save_stat:
-            self.detect_domain_shift(batch_mu, batch_var, test_mean, test_var)
+            self.detect_domain_shift2(batch_mu, batch_var, test_mean, test_var)
 
         if self.use_dynamic_weight:
             prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
@@ -914,6 +953,47 @@ class BatchNormWithMemory2(nn.Module):
             return 0.5, 0.5
 
         return prior, prior
+    
+
+    def detect_domain_shift2(self, test_mu, test_var, global_mu, global_var):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        mem_std = torch.sqrt(mem_var)
+        global_std = torch.sqrt(global_var)
+        test_std = torch.sqrt(test_var)
+
+        dist_mean_m2avg = torch.cdist(mem_mean, global_mu.unsqueeze(0)).squeeze()
+        dist_std_m2avg = torch.cdist(mem_std, global_std.unsqueeze(0)).squeeze()
+
+        var_dist_mean_m2avg, mean_dist_mean_m2avg = torch.var_mean(dist_mean_m2avg)
+        var_dist_std_m2avg, mean_dist_std_m2avg = torch.var_mean(dist_std_m2avg)
+
+        dist_mean_b2avg = torch.cdist(test_mu.unsqueeze(0), global_mu.unsqueeze(0)).squeeze()
+        dist_std_b2avg = torch.cdist(test_std.unsqueeze(0), global_std.unsqueeze(0)).squeeze()
+
+        condition1 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) > conf.args.threshold
+        condition2 =  (mean_dist_mean_m2avg - dist_mean_b2avg) / torch.sqrt(var_dist_mean_m2avg) < -1 * conf.args.threshold
+
+        condition3 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) > conf.args.threshold
+        condition4 =  (mean_dist_std_m2avg - dist_std_b2avg) / torch.sqrt(var_dist_std_m2avg) < -1 * conf.args.threshold
+
+        if condition1 or condition2 or condition3 or condition4:
+            self.reset_subsequent_bns()
+
+            if condition1:
+                self.event_count1 = self.event_count1 + 1
+
+            if condition2:
+                self.event_count2 = self.event_count2 + 1
+
+            if condition3:
+                self.event_count3 = self.event_count3 + 1
+
+            if condition4:
+                self.event_count4 = self.event_count4 + 1
+
+            print("domain_shift is detected ", self.event_count1, self.event_count2, self.event_count3, self.event_count4)
+
 
 class BatchNormWithMultiMemory(nn.Module):
     @staticmethod
