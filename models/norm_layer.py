@@ -635,6 +635,39 @@ class BatchNormWithMemory(nn.Module):
 
         return prior, prior
 
+    def dynamic_weight2(self, test_mu, test_var, mem_mean, mem_var):
+        if self.push_last and not self.batch_full and self.batch_pointer == 0: # no item,
+            return 0.5, 0.5 
+
+        test_std = torch.sqrt(test_var)
+        mem_std = torch.sqrt(mem_var)
+
+        # TODO: layer-wise interpolation
+        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0)).squeeze()
+        test2src_std = torch.cdist(test_std.unsqueeze(0), torch.sqrt(self.layer.src_running_var).unsqueeze(0)).squeeze()
+
+        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0)).squeeze()
+        test2mem_std = torch.cdist(test_std.unsqueeze(0), mem_std.unsqueeze(0)).squeeze()
+
+        # TODO: same weight or separated weight?
+
+        test2src = test2src_mu + test2src_std
+        test2mem = test2mem_mu + test2mem_std
+
+        prior = 1 - test2src / (test2src + test2mem)
+        if conf.args.gamma != 1.0:
+            prior = prior ** conf.args.gamma
+        prior = prior.detach()
+
+        self.last_prior_mu = prior
+        self.last_prior_var = prior
+
+        if not self.push_last and not self.batch_full and self.batch_pointer == 1: # just only one item,
+            return 0.5, 0.5 
+
+        return prior, prior
+
+
     def binary_selection(self, a_mu, a_var, b_mu, b_var, std_threshold=1.0):
         std_of_mem_mu, std_of_mem_var = self.get_stat_of_mem(std=True)
 
@@ -660,6 +693,227 @@ class BatchNormWithMemory(nn.Module):
 
         return output_mu, output_var
 
+
+
+class BatchNormWithMemory2(nn.Module):
+    @staticmethod
+    def find_bns(parent, memory_size, use_prior, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, push_last=False):
+        replace_mods = []
+        if parent is None:
+            return []
+        for name, child in parent.named_children():
+            # child.requires_grad_(False)
+            if isinstance(child, nn.BatchNorm2d):
+                module = BatchNormWithMemory2(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                             use_dynamic_weight, push_last)
+                replace_mods.append((parent, name, module))
+            else:
+                replace_mods.extend(BatchNormWithMemory2.find_bns(child, memory_size, use_prior, batch_renorm, add_eps_numer,
+                                                                 use_dynamic_weight, push_last))
+    
+        return replace_mods
+
+    @staticmethod
+    def adapt_model(model, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                    use_dynamic_weight=False, push_last=False):
+        replace_mods = BatchNormWithMemory2.find_bns(model, memory_size, use_prior, batch_renorm=batch_renorm, add_eps_numer=add_eps_numer,
+                                                    use_dynamic_weight=use_dynamic_weight, push_last=push_last)
+        print(f"| Found {len(replace_mods)} modules to be replaced.")
+        for (parent, name, child) in replace_mods:
+            setattr(parent, name, child)
+
+        for _, (_, _, child) in enumerate(replace_mods):
+            all_memorybn_layers = [bn for _, _, bn in replace_mods]
+            setattr(child, 'remaining_bns', all_memorybn_layers)
+
+        return model
+    
+    def reset_subsequent_bns(self):
+        for memory_bn in self.remaining_bns:
+            memory_bn.reset()
+
+    def __init__(self, layer, memory_size, use_prior=None, batch_renorm=False, add_eps_numer=False,
+                 use_dynamic_weight=False, push_last=False):
+        super().__init__()
+
+        self.layer = layer
+
+        self.memory_size = memory_size
+        self.use_prior = use_prior
+        self.batch_renorm = batch_renorm
+
+        batch_mu_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        batch_var_memory = torch.randn(size=(memory_size, self.layer.num_features), device=self.layer.weight.device)
+        self.register_buffer('batch_mu_memory', batch_mu_memory)
+        self.register_buffer('batch_var_memory', batch_var_memory)
+
+        self.unbiased = False
+
+        batch_pointer = torch.zeros(1, dtype=torch.int)
+        self.register_buffer('batch_pointer', batch_pointer)
+
+        batch_full = torch.zeros(1, dtype=torch.bool)
+        self.register_buffer('batch_full', batch_full)
+
+        self.add_eps_numer = add_eps_numer
+
+        self.use_dynamic_weight = use_dynamic_weight
+        self.push_last = push_last
+
+        self.event_count1 = 0
+        self.event_count2 = 0
+        self.event_count3 = 0
+        self.event_count4 = 0
+
+        self.save_stat = True
+
+    def set_save_stat(self, save_stat):
+        self.save_stat = save_stat
+        
+    def reset(self):
+        # self.pointer = 0
+        # self.full = False
+
+        self.batch_pointer[0] = 0
+        self.batch_full[0] = False
+
+    def get_stat_of_mem(self, std=False):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        if std:
+            std_of_mem_mean = mem_mean.std([0], unbiased=False)
+            std_of_mem_var = mem_var.std([0], unbiased=False)
+            
+            return std_of_mem_mean, std_of_mem_var
+        else:
+            var_of_mem_mean = mem_mean.var([0], unbiased=False)
+            var_of_mem_var = mem_var.var([0], unbiased=False)
+
+            return var_of_mem_mean, var_of_mem_var
+        
+    def get_batch_mu_and_var(self):
+        if self.batch_full:
+            return self.batch_mu_memory, self.batch_var_memory
+        return self.batch_mu_memory[:self.batch_pointer.item()], self.batch_var_memory[:self.batch_pointer.item()]
+
+    def get_aggreated_statistics(self):
+        mem_mean, mem_var = self.get_batch_mu_and_var()
+
+        if conf.args.add_correction_term1:
+            first = torch.mean(mem_var, 0)
+            second = torch.mean(mem_mean * mem_mean, 0)
+            third = mem_mean.mean(0) * mem_mean.mean(0)
+
+            test_var = first + second - third
+            test_mean = torch.mean(mem_mean, 0)
+        else:
+            test_mean = torch.mean(mem_mean, 0)
+            test_var = torch.mean(mem_var, 0)
+
+        return test_mean, test_var
+
+    def forward(self, input):
+        # self._check_input_dim(input)
+        if self.update_src_stat:
+            _ = self.layer(input)
+        
+        # TODO: use mean_and_var or batch_norm(trainaing=True, momentum=1.0)???
+        batch_mu = input.mean([0, 2, 3])
+        batch_var = input.var([0, 2, 3], unbiased=False)
+
+        if not self.push_last and self.save_stat:
+            # save mu and variance in memory
+            batch_start = self.batch_pointer.item()
+            batch_end = self.batch_pointer.item() + 1
+            batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
+
+            self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
+            self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
+
+            self.batch_pointer[0] = batch_end % self.memory_size
+
+            if batch_end >= self.memory_size:
+                self.batch_full[0] = True
+
+        # compute test mu and variance from in-memory elements
+        if self.batch_full:
+            test_mean = self.batch_mu_memory
+            test_var = self.batch_var_memory
+        elif self.batch_pointer == 0:
+            test_mean = batch_mu.unsqueeze(0)
+            test_var = batch_var.unsqueeze(0)
+        else:
+            test_mean = self.batch_mu_memory[:self.batch_pointer.item(), :]
+            test_var = self.batch_var_memory[:self.batch_pointer.item(), :]
+
+        first = torch.mean(test_var, 0)
+        second = torch.mean(test_mean * test_mean, 0)
+        third = test_mean.mean(0) * test_mean.mean(0)
+        test_var = first + second - third
+
+        test_mean = torch.mean(test_mean, 0)
+
+        if self.batch_full or self.batch_pointer > 10 and self.save_stat:
+            self.detect_domain_shift(batch_mu, batch_var, test_mean, test_var)
+
+        if self.use_dynamic_weight:
+            prior_mu, prior_var = self.dynamic_weight(batch_mu, batch_var, test_mean, test_var)
+            test_mean, test_var = calculate_weighted_stat(self.layer.src_running_mean, self.layer.src_running_var,
+                                                         test_mean, test_var, prior_mu, prior_var)
+        else:
+            raise NotImplemented
+        
+        if self.push_last and self.save_stat:
+            # save mu and variance in memory
+            batch_start = self.batch_pointer.item()
+            batch_end = self.batch_pointer.item() + 1
+            batch_idxs_replace = torch.arange(batch_start, batch_end).to(input.device) % self.memory_size
+
+            self.batch_mu_memory[batch_idxs_replace, :] = batch_mu.detach()
+            self.batch_var_memory[batch_idxs_replace, :] = batch_var.detach()
+
+            self.batch_pointer[0] = batch_end % self.memory_size
+
+            if batch_end >= self.memory_size:
+                self.batch_full[0] = True
+        
+        if self.batch_renorm:
+            input = BatchRenorm(input, test_mean, test_var, self.layer.eps, self.add_eps_numer)
+            input = self.layer.weight[None, :, None, None] * input + self.layer.bias[None, :, None, None]
+
+            return input
+        else:
+            input = (input - test_mean[None, :, None, None]) / (torch.sqrt(test_var[None, :, None, None] + self.layer.eps))
+            input = input * self.layer.weight[None, :, None, None] + self.layer.bias[None, :, None, None]
+            return input
+
+    def dynamic_weight(self, test_mu, test_var, mem_mean, mem_var):
+        if self.push_last and not self.batch_full and self.batch_pointer == 0: # no item,
+            return 0.5, 0.5
+        
+        # TODO: layer-wise interpolation
+        test2src_mu = torch.cdist(test_mu.unsqueeze(0), self.layer.src_running_mean.unsqueeze(0)).squeeze()
+        test2src_var = torch.cdist(test_var.unsqueeze(0), self.layer.src_running_var.unsqueeze(0)).squeeze()
+
+        test2mem_mu = torch.cdist(test_mu.unsqueeze(0), mem_mean.unsqueeze(0)).squeeze()
+        test2mem_var = torch.cdist(test_var.unsqueeze(0), mem_var.unsqueeze(0)).squeeze()
+
+        test2src = test2src_mu + test2src_var
+        test2mem = test2mem_mu + test2mem_var
+
+        prior = 1 - test2src / (test2src + test2mem)
+        if conf.args.gamma != 1.0:
+            prior = prior ** conf.args.gamma
+        prior = prior.detach()
+
+        self.last_prior_mu = prior
+        self.last_prior_var = prior
+        
+        if not self.push_last and not self.batch_full and self.batch_pointer == 1: # just only one item,
+            return 0.5, 0.5
+
+        return prior, prior
 
 class BatchNormWithMultiMemory(nn.Module):
     @staticmethod
