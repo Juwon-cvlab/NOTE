@@ -132,3 +132,72 @@ class NOTE(DNN):
         self.log_loss_results('train_online', epoch=current_num_sample, loss_avg=0)
 
         return TRAINED
+    
+    def train_online_imagenet(self):
+        """
+        Train the model
+        """
+        current_num_sample = 0
+
+        for batch_idx, data in enumerate(self.target_dataloader['train']):
+            feats, cls, dls = data
+
+            for data_idx in range(feats.shape[0]):
+                if feats.shape[0] != conf.args.update_every_x:
+                    print("FIXME, something wrong...")
+
+                feat, cl, dl = feats[data_idx], cls[data_idx], dls[data_idx]
+                current_sample = feat, cl, dl
+                self.fifo.add_instance(current_sample)
+
+                with torch.no_grad():
+                    self.net.eval()
+
+                    if conf.args.memory_type in ['FIFO', 'Reservoir']:
+                        self.mem.add_instance(current_sample)
+
+                    elif conf.args.memory_type in ['PBRS']:
+                        f, c, d = current_sample[0].to(device), current_sample[1].to(device), current_sample[2].to(device)
+
+                        logit = self.net(f.unsqueeze(0))
+                        pseudo_cls = logit.max(1, keepdim=False)[1][0]
+                        self.mem.add_instance([f, pseudo_cls, d, c, 0])
+
+                if conf.args.use_learned_stats:
+                    self.evaluation_online(current_num_sample, '', [[current_sample[0]], [current_sample[1]], [current_sample[2]]])
+                
+                current_num_sample = current_num_sample + 1
+
+            if not conf.args.use_learned_stats: #batch-based inference
+                self.evaluation_online(current_num_sample, '', self.fifo.get_memory())
+
+            # setup models
+            self.net.train()
+
+            if len(feats) == 1:  # avoid BN error
+                self.net.eval()
+
+            feats, _, _ = self.mem.get_memory()
+            feats = torch.stack(feats)
+            dataset = torch.utils.data.TensorDataset(feats)
+            data_loader = DataLoader(dataset, batch_size=conf.args.opt['batch_size'],
+                                    shuffle=True, drop_last=False, pin_memory=False)
+
+            entropy_loss = HLoss(temp_factor=conf.args.temperature)
+
+            for e in range(conf.args.epoch):
+
+                for batch_idx, (feats,) in enumerate(data_loader):
+                    feats = feats.to(device)
+                    preds_of_data = self.net(feats) # update bn stats
+
+                    if conf.args.no_optim:
+                        pass # no optimization
+                    else:
+                        loss = entropy_loss(preds_of_data)
+
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        self.optimizer.step()
+
+            self.log_loss_results('train_online', epoch=current_num_sample, loss_avg=0)
