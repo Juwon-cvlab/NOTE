@@ -8,15 +8,20 @@ from utils import memory
 from utils.loss_functions import *
 from sklearn.metrics import f1_score
 
-from models.norm_layer import BatchNormWithMemory
+from models.norm_layer import BatchNormWithMemory2
 
 device = torch.device("cuda:{:d}".format(conf.args.gpu_idx) if torch.cuda.is_available() else "cpu")
 from utils.iabn import *
 
 def set_save_stat_in_membn(net, save_stat):
     for m in net.modules():
-        if isinstance(m, BatchNormWithMemory):
+        if isinstance(m, BatchNormWithMemory2):
             m.set_save_stat(save_stat)
+
+def set_update_src_stat_in_membn(net, src_stat):
+    for m in net.modules():
+        if isinstance(m, BatchNormWithMemory2):
+            m.update_src_stat = src_stat
 
 
 class TENT_PBRS3(DNN):
@@ -36,6 +41,9 @@ class TENT_PBRS3(DNN):
                 if conf.args.use_learned_stats:
                     module.track_running_stats = True
                     module.momentum = conf.args.bn_momentum
+
+                    module.src_running_mean = module.running_mean
+                    module.src_running_var = module.running_var
                 else:
                     # With below, this module always uses the test batch statistics (no momentum)
                     module.track_running_stats = False
@@ -109,9 +117,11 @@ class TENT_PBRS3(DNN):
         else:
             set_save_stat_in_membn(self.net, True)
 
-        self.net.update_src_stat = True
+        if conf.args.use_learned_stats:
+            set_update_src_stat_in_membn(self.net, True)    
         self._train_memory(current_num_sample)
-        self.net.update_src_stat = False
+        if conf.args.use_learned_stats:
+            set_update_src_stat_in_membn(self.net, False)
 
         return TRAINED
 
